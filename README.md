@@ -18,19 +18,50 @@ Official binary executable - https://go.steganos.com/productpage_locknote2_downl
 Build Notes
 -----------
 
-LockNote 2 builds with Microsoft Visual Studio 2022 (v143 toolset).
+LockNote 2 builds with:
 
-The LockNote 2 source has following dependencies:
+* Microsoft Visual Studio 2022 17.14+ (`v143`)
+* C++ language mode: `/std:c++23preview` (project default)
+* vcpkg manifest mode (`vcpkg.json`)
+
+Dependencies:
 
 * CryptoPP (from vcpkg manifest)
 * WTL 10 (from vcpkg manifest)
 
-Dependencies are restored automatically through `vcpkg.json` when opening the
-solution in Visual Studio with vcpkg integration enabled.
+Dependencies are restored automatically by Visual Studio when vcpkg integration
+is enabled.
+
+Recommended local validation on Windows:
+
+```powershell
+pwsh .\scripts\windows-qa.ps1
+```
+
+The script performs:
+
+* Debug/Release builds (`Win32`)
+* Optional MSVC Code Analysis (`RunCodeAnalysis=true`)
+* Optional `cppcheck` run (if installed)
+* AES encryption/decryption smoke tests (`tests/aeslayer_smoke.cpp`)
+
+Upstream tracking:
+
+* PR #6 (`steganos-oss/locknote2#6`) has been integrated in this fork.
+* Upstream issues reviewed during this audit: #3, #4, #5, #7, #8.
+* Detailed change list is maintained in `CHANGELOG.md`.
 
 
 History
 -------
+
+* 2.1.1, 2026/02/14:
+	- FIX: Switched file path operations to Unicode-safe APIs (`W` WinAPI / `_wfopen_s`)
+	- FIX: Added bounded retry logic for writeback/erase helper to avoid infinite loops
+	- FIX: Added constant-time password comparison for password change flow
+	- FIX: Improved file operation error handling (temp file creation, module path checks)
+	- SECURITY: Raised compiler warning level and switched project default to C++23 preview mode
+	- QA: Added Windows QA scripts and AES smoke tests
 
 * 2.1.0, 2026/02/14:
 	- NEW: Added vcpkg manifest mode build integration (PR #6 backport)
