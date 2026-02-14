@@ -19,6 +19,7 @@
 - Added `scripts/windows-qa.ps1` for Debug/Release builds, optional code analysis, optional cppcheck, and smoke tests.
 - Added `scripts/build-and-run-aes-smoke.ps1`.
 - Added `tests/aeslayer_smoke.cpp` with round-trip and tamper-detection checks.
+- Added GitHub Actions workflow `.github/workflows/windows-qa.yml` for automated Windows QA on push/PR.
 
 ### Upstream tracking
 - Verified PR #6 (`steganos-oss/locknote2#6`) integration in this fork.

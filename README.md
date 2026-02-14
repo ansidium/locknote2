@@ -24,6 +24,31 @@ LockNote 2 builds with:
 * C++ language mode: `/std:c++23preview` (project default)
 * vcpkg manifest mode (`vcpkg.json`)
 
+Windows setup checklist:
+
+* Visual Studio 2022 with workload `Desktop development with C++`
+* VS components:
+  - `MSVC v143 - VS 2022 C++ x64/x86 build tools`
+  - `Windows 11 SDK` (10.0.26100+ recommended)
+  - `C++ ATL for latest v143 build tools` (required by ATL/WTL project)
+* Git for Windows
+* PowerShell 7 (`pwsh`) for QA scripts
+
+One-time vcpkg setup:
+
+```powershell
+git clone https://github.com/microsoft/vcpkg $env:USERPROFILE\vcpkg
+& $env:USERPROFILE\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+$env:VCPKG_ROOT = "$env:USERPROFILE\vcpkg"
+& $env:VCPKG_ROOT\vcpkg integrate install
+```
+
+Build from command line:
+
+```powershell
+msbuild .\locknote2.sln /m /t:Restore,Build /p:Configuration=Release;Platform=Win32;VcpkgEnableManifest=true
+```
+
 Dependencies:
 
 * CryptoPP (from vcpkg manifest)
@@ -45,6 +70,10 @@ The script performs:
 * Optional `cppcheck` run (if installed)
 * AES encryption/decryption smoke tests (`tests/aeslayer_smoke.cpp`)
 
+GitHub CI:
+
+* `.github/workflows/windows-qa.yml` runs the same QA pipeline on `windows-2022` for push/PR.
+
 Upstream tracking:
 
 * PR #6 (`steganos-oss/locknote2#6`) has been integrated in this fork.
@@ -62,6 +91,7 @@ History
 	- FIX: Improved file operation error handling (temp file creation, module path checks)
 	- SECURITY: Raised compiler warning level and switched project default to C++23 preview mode
 	- QA: Added Windows QA scripts and AES smoke tests
+	- QA: Added GitHub Actions Windows QA workflow
 
 * 2.1.0, 2026/02/14:
 	- NEW: Added vcpkg manifest mode build integration (PR #6 backport)
