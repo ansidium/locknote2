@@ -13,11 +13,11 @@ try {
     }
 
     $candidateRoots = @(
-        Join-Path $repoRoot "vcpkg_installed\\$Triplet",
-        Join-Path $repoRoot "vcpkg_installed\\$Triplet\\$Triplet"
+        (Join-Path -Path $repoRoot -ChildPath "vcpkg_installed\\$Triplet")
+        (Join-Path -Path $repoRoot -ChildPath "vcpkg_installed\\$Triplet\\$Triplet")
     )
     if ($env:VCPKG_ROOT) {
-        $candidateRoots += Join-Path $env:VCPKG_ROOT "installed\\$Triplet"
+        $candidateRoots += (Join-Path -Path $env:VCPKG_ROOT -ChildPath "installed\\$Triplet")
     }
 
     $resolvedRoot = $null
