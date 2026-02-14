@@ -17,16 +17,23 @@
 
 #pragma once
 
-#if _MSC_VER >= 1300 // for VC 7.0
-	#ifndef _delayimp_h
-	extern "C" IMAGE_DOS_HEADER __ImageBase;
-	#endif
-#endif
-
 #include "utf8unicode.h"
 
-std::string GetPasswordDlg(HWND hWnd = NULL);
-std::string GetNewPasswordDlg(HWND hWnd = NULL);
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <charconv>
+#include <cstdio>
+#include <cstring>
+#include <sstream>
+#include <string>
+#include <system_error>
+#include <vector>
+
+#include "cryptopp/misc.h"
+
+std::string GetPasswordDlg(HWND hWnd = nullptr);
+std::string GetNewPasswordDlg(HWND hWnd = nullptr);
 
 typedef struct wintraits_t
 {
@@ -34,6 +41,7 @@ typedef struct wintraits_t
 	int m_nWindowSizeY;
 	int m_nFontSize;
 	int m_nLangId;
+	int m_nKdfMode;
 	std::string m_strFontName;
 } LOCKNOTEWINTRAITS, *LPLOCKNOTEWINTRAITS;
 
@@ -41,52 +49,94 @@ namespace Utils
 {
 	using namespace CryptoPP;
 
-	HMODULE GetModuleHandle(void)
+	inline HMODULE GetModuleHandle(void)
 	{
 		return ::GetModuleHandle(nullptr);
-//#if _MSC_VER < 1300 // earlier than .NET compiler (VC 6.0)
-//		MEMORY_BASIC_INFORMATION mbi;
-//		static int dummy;
-//		VirtualQuery( &dummy, &mbi, sizeof(mbi) );
-//
-//		return reinterpret_cast<HMODULE>(mbi.AllocationBase);
-//#else // VC 7.0
-//		return reinterpret_cast<HMODULE>(&__ImageBase);
-//#endif
 	}
 
-	std::string STR(UINT nResourceID)
+	inline std::string STR(UINT nResourceID)
 	{
-		std::string text;
-		//text.resize(16384); // this creates a bug when comparing strings later on. don't.
-		char szBuffer[16384]{ "" };
-		LoadStringA(GetModuleHandle(), nResourceID, szBuffer, 16384);
-		text = szBuffer;
-		return text;
+		std::array<char, 16384> buffer{};
+		LoadStringA(GetModuleHandle(), nResourceID, buffer.data(), static_cast<int>(buffer.size()));
+		return buffer.data();
 	}
 
-	std::wstring WSTR(UINT nResourceID)
+	inline std::wstring WSTR(UINT nResourceID)
 	{
-		std::wstring text;
-		//text.resize(16384); // this creates a bug when comparing strings later on. don't.
-		CHAR szBuffer[16384]{ "" };
-		LoadStringA(GetModuleHandle(), nResourceID, szBuffer, 16384);
-		text = utf8_to_wstring(szBuffer);
-		return text;
+		std::array<char, 16384> buffer{};
+		LoadStringA(GetModuleHandle(), nResourceID, buffer.data(), static_cast<int>(buffer.size()));
+		return utf8_to_wstring(buffer.data());
 	}
 
-	int MessageBox(HWND hWnd, const std::wstring& text, UINT uType)
+	inline int MessageBox(HWND hWnd, const std::wstring& text, UINT uType)
 	{
 		return ::MessageBox(hWnd, text.c_str(), WSTR(IDR_MAINFRAME).c_str(), uType);
 	}
 
-	bool UpdateResource(const std::string& strExePath, const std::string& strResourceName, const std::string& strResourceSection, std::vector<unsigned char>& arrayBuffer)
+	inline std::string Quote(const std::string& strText)
+	{
+		return std::string("\"") + strText + std::string("\"");
+	}
+
+	// lower a std::string. from https://en.cppreference.com/w/cpp/string/byte/tolower
+	inline std::string str_tolower(std::string s)
+	{
+		std::transform(s.begin(), s.end(), s.begin(),
+			[](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); }
+		);
+		return s;
+	}
+
+	inline bool HasExtension(const std::string& path, const std::string& extension)
+	{
+		if (path.size() < extension.size())
+		{
+			return false;
+		}
+
+		const std::string pathExtension = str_tolower(path.substr(path.size() - extension.size()));
+		return pathExtension == str_tolower(extension);
+	}
+
+	inline bool TryParseInt(const std::string& value, int& out)
+	{
+		if (value.empty())
+		{
+			return false;
+		}
+
+		out = 0;
+		const char* begin = value.data();
+		const char* end = value.data() + value.size();
+		const auto [parsedUntil, ec] = std::from_chars(begin, end, out);
+		return ec == std::errc{} && parsedUntil == end;
+	}
+
+	inline AESLayer::KdfMode ParseKdfModeValue(const int value)
+	{
+		return value == static_cast<int>(AESLayer::KdfMode::Pbkdf2Sha256)
+			? AESLayer::KdfMode::Pbkdf2Sha256
+			: AESLayer::KdfMode::Scrypt;
+	}
+
+	inline bool UpdateResource(
+		const std::string& strExePath,
+		const std::string& strResourceName,
+		const std::string& strResourceSection,
+		const std::vector<unsigned char>& arrayBuffer)
 	{
 		bool bResult = false;
 		HANDLE hFile = ::BeginUpdateResourceA(strExePath.c_str(), false);
 		if (hFile)
 		{
-			bResult = ::UpdateResourceA(hFile, strResourceSection.c_str(), strResourceName.c_str(), LANG_NEUTRAL, &arrayBuffer[0], arrayBuffer.size())?true:false;
+			void* resourceData = arrayBuffer.empty() ? nullptr : const_cast<unsigned char*>(arrayBuffer.data());
+			bResult = ::UpdateResourceA(
+				hFile,
+				strResourceSection.c_str(),
+				strResourceName.c_str(),
+				LANG_NEUTRAL,
+				resourceData,
+				static_cast<DWORD>(arrayBuffer.size())) ? true : false;
 
 			if (!::EndUpdateResource(hFile, false))
 			{
@@ -96,16 +146,16 @@ namespace Utils
 		return bResult;
 	}
 
-	bool UpdateResource(const std::string& strExePath, const std::string& strResourceName, const std::string& strResourceSection, const std::string& strText)
+	inline bool UpdateResource(const std::string& strExePath, const std::string& strResourceName, const std::string& strResourceSection, const std::string& strText)
 	{
 		std::vector<unsigned char> arrayBuffer;
 		size_t dwSize = (strText.size() + 1) * sizeof(char);
 		arrayBuffer.resize(dwSize);
-		memcpy(&arrayBuffer[0], strText.c_str(), dwSize);
+		std::memcpy(arrayBuffer.data(), strText.c_str(), dwSize);
 		return UpdateResource(strExePath, strResourceName, strResourceSection, arrayBuffer);
 	}
 
-	bool LoadResource(const std::string& strResourceName, const std::string& strResourceSection, std::vector<unsigned char>& arrayBuffer, HMODULE hModule = GetModuleHandle())
+	inline bool LoadResource(const std::string& strResourceName, const std::string& strResourceSection, std::vector<unsigned char>& arrayBuffer, HMODULE hModule = GetModuleHandle())
 	{
 		bool bResult = false;
 		HRSRC hResInfo = ::FindResourceA(hModule, strResourceName.c_str(), strResourceSection.c_str());
@@ -117,150 +167,170 @@ namespace Utils
 			{
 				void* pData = ::LockResource(hRes);
 				if (pData)
-				{			
-					arrayBuffer.resize(dwSize,0);
-					memcpy(&arrayBuffer[0],pData,dwSize);
+				{
+					arrayBuffer.resize(dwSize, 0);
+					std::memcpy(arrayBuffer.data(), pData, dwSize);
 					bResult = true;
-					UnlockResource(hRes);
-				}			
+				}
 			}
 		}
 		return bResult;
 	}
 
-	bool LoadResource(const std::string& strResourceName, const std::string& strResourceSection, std::string& strText, HMODULE hModule = GetModuleHandle())
+	inline bool LoadResource(const std::string& strResourceName, const std::string& strResourceSection, std::string& strText, HMODULE hModule = GetModuleHandle())
 	{
 		bool bResult = false;
 		std::vector<unsigned char> arrayBuffer;
 		bResult = LoadResource(strResourceName, strResourceSection, arrayBuffer, hModule);
 		if (bResult)
 		{
-			arrayBuffer[arrayBuffer.size() - 1] = '\0';
-			strText = (char*)&arrayBuffer[0];			
+			if (arrayBuffer.empty())
+			{
+				strText.clear();
+				return true;
+			}
+
+			arrayBuffer.back() = '\0';
+			strText = reinterpret_cast<char*>(arrayBuffer.data());
 		}
 		return bResult;
 	}
 
-	bool EncryptString(const std::string& strText, const std::string& strPassword, std::string& strEncryptedData)
+	inline bool EncryptString(
+		const std::string& strText,
+		const std::string& strPassword,
+		std::string& strEncryptedData,
+		const AESLayer::KdfMode kdfMode = AESLayer::KdfMode::Scrypt)
 	{
-		RandomPool randPool;
-		int nSeedlen = 32;
-		SecByteBlock seed(nSeedlen);
+		AutoSeededRandomPool rng;
+		AESLayer aes;
+		std::vector<byte> cipher(aes.MaxCiphertextLen(static_cast<unsigned int>(strText.length())), 0);
+		AESLayer::EncryptionOptions options;
+		options.m_kdfMode = kdfMode;
+		const unsigned int cipherLen = aes.Encrypt(rng, strPassword, cipher.data(), strText, options);
 
-		OS_GenerateRandomBlock(false, seed, seed.size());
-		randPool.IncorporateEntropy(seed, seed.size());
-
-		AESLayer Aes;
-		DWORD dwMaxCipherTextLen = Aes.MaxCiphertextLen(strText.length());
-		byte *pCipher = new byte[dwMaxCipherTextLen];
-		memset(pCipher, 0, dwMaxCipherTextLen);
-		DWORD dwCipherLen = Aes.Encrypt(randPool, strPassword, pCipher, strText);
+		strEncryptedData.clear();
 		HexEncoder hex(new StringSink(strEncryptedData));
-		hex.Put(pCipher, dwCipherLen);
-		delete []pCipher;
+		hex.Put(cipher.data(), cipherLen);
+		hex.MessageEnd();
 		return true;
 	}
 
-	bool DecryptString(const std::string& strEncryptedData, const std::string& strPassword, std::string& strText)
+	inline bool DecryptString(const std::string& strEncryptedData, const std::string& strPassword, std::string& strText)
 	{
-		AESLayer Aes;
-		DWORD dwCipherTextLength = strEncryptedData.size() / 2;
-		byte *pCipher = new byte[dwCipherTextLength];
-		HexDecoder hex(new ArraySink(pCipher, dwCipherTextLength));
-		hex.Put((byte*)strEncryptedData.c_str(), strEncryptedData.size());
-		ConstByteArrayParameter cbar((const byte*)pCipher, dwCipherTextLength);
-		byte *pPlaintext = new byte[dwCipherTextLength];
-		DecodingResult res = Aes.Decrypt(strPassword, pPlaintext, cbar);
-		delete[] pCipher;
-		if (res.isValidCoding)
+		strText.clear();
+		if ((strEncryptedData.size() % 2) != 0)
 		{
-			strText = (char*)pPlaintext;
-			strText = strText.substr(0, res.messageLength); 
-			delete[] pPlaintext;
+			return false;
+		}
+
+		try
+		{
+			AESLayer aes;
+			const size_t cipherTextLength = strEncryptedData.size() / 2;
+			std::vector<byte> cipher(cipherTextLength, 0);
+
+			HexDecoder hex(new ArraySink(cipher.data(), cipher.size()));
+			hex.Put(reinterpret_cast<const byte*>(strEncryptedData.data()), strEncryptedData.size());
+			hex.MessageEnd();
+
+			ConstByteArrayParameter cbar(cipher.data(), cipherTextLength);
+			std::vector<byte> plainText(cipherTextLength, 0);
+			const DecodingResult result = aes.Decrypt(strPassword, plainText.data(), cbar);
+			if (!result.isValidCoding)
+			{
+				return false;
+			}
+
+			strText.assign(reinterpret_cast<const char*>(plainText.data()), result.messageLength);
+			SecureWipeBuffer(plainText.data(), plainText.size());
 			return true;
 		}
-		else 
+		catch (const Exception&)
 		{
-			delete[] pPlaintext;
 			return false;
-		}	
+		}
 	}
 
-	std::string Quote(const std::string& strText)
+	inline bool WriteWinTraitsResources(const std::string& path, const LOCKNOTEWINTRAITS& wintraits)
 	{
-		return std::string("\"") + strText + std::string("\"");
-	}
-
-	// lower a std::string. from https://en.cppreference.com/w/cpp/string/byte/tolower
-	std::string str_tolower(std::string s)
-	{
-		std::transform(s.begin(), s.end(), s.begin(),
-			[](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); }
-		);
-		return s;
-	}
-
-	bool LoadTextFromFile(const std::string& path, std::string& text, std::string& password)
-	{
-		std::string filepath = path;
-
-		filepath = str_tolower(filepath);
-		int nFileNameLength = filepath.size();
-		if (nFileNameLength > 4)
+		bool result = true;
+		result &= UpdateResource(path, "SIZEX", "INFORMATION", std::to_string(wintraits.m_nWindowSizeX));
+		result &= UpdateResource(path, "SIZEY", "INFORMATION", std::to_string(wintraits.m_nWindowSizeY));
+		result &= UpdateResource(path, "FONTSIZE", "INFORMATION", std::to_string(wintraits.m_nFontSize));
+		result &= UpdateResource(path, "TYPEFACE", "INFORMATION", wintraits.m_strFontName);
+		result &= UpdateResource(path, "KDFMODE", "INFORMATION", std::to_string(wintraits.m_nKdfMode));
+		if (wintraits.m_nLangId != 0)
 		{
-			if (filepath.substr(nFileNameLength - 4, -1) == ".txt")
+			result &= UpdateResource(path, "LANGID", "INFORMATION", std::to_string(wintraits.m_nLangId));
+		}
+		return result;
+	}
+
+	inline bool LoadTextFromFile(const std::string& path, std::string& text, std::string& password)
+	{
+		text.clear();
+		password.clear();
+
+		if (!HasExtension(path, ".txt"))
+		{
+			return false;
+		}
+
+		FILE* f = nullptr;
+		const errno_t err = fopen_s(&f, path.c_str(), "rb");
+		if (err != 0 || f == nullptr)
+		{
+			return false;
+		}
+
+		if (fseek(f, 0, SEEK_END) != 0)
+		{
+			fclose(f);
+			return false;
+		}
+
+		const long fileSize = ftell(f);
+		if (fileSize < 0 || fseek(f, 0, SEEK_SET) != 0)
+		{
+			fclose(f);
+			return false;
+		}
+
+		text.resize(static_cast<size_t>(fileSize), '\0');
+		if (fileSize > 0)
+		{
+			const size_t readCount = fread(text.data(), sizeof(char), static_cast<size_t>(fileSize), f);
+			if (readCount != static_cast<size_t>(fileSize))
 			{
-				FILE* f = nullptr;
-				errno_t err = fopen_s(&f, path.c_str(), "rb");
-				if (err == 0 && f)
-				{
-					fseek(f, 0, SEEK_END);
-					DWORD dwFileSize = (DWORD)ftell(f);
-					fseek(f, 0, SEEK_SET);
-					if (dwFileSize)
-					{
-						text.resize(dwFileSize + 1);
-						fread((char*)text.c_str(), sizeof(char), dwFileSize, f);
-						text[dwFileSize] = '\0';
-					}
-					fclose(f);
-					return true;
-				}
+				fclose(f);
 				return false;
 			}
 		}
 
-		return false;
+		fclose(f);
+		return true;
 	}
 
-	bool SaveTextToFile(const std::string& path, const std::string& text, std::string& password, HWND hWnd = 0, LPLOCKNOTEWINTRAITS wintraits = nullptr)
+	inline bool SaveTextToFile(const std::string& path, const std::string& text, std::string& password, HWND hWnd = 0, LPLOCKNOTEWINTRAITS wintraits = nullptr)
 	{
-		std::string filepath = path;
-
-		//strlwr((char*)filepath.c_str());
-		int nFileNameLength = filepath.size();
-		if (nFileNameLength > 4)
+		if (HasExtension(path, ".txt"))
 		{
-			std::string extension = filepath.substr(nFileNameLength - 4, -1);
-			//_strlwr_s((char*)extension.c_str(), extension.size());
-			extension = str_tolower(extension);
-			if (extension == ".txt")
+			FILE* f = nullptr;
+			const errno_t err = fopen_s(&f, path.c_str(), "wb");
+			if (err != 0 || f == nullptr)
 			{
-				FILE* f = nullptr;
-				errno_t err = fopen_s(&f, filepath.c_str(), "rb");
-				if (err == 0 && f)
-				{
-					bool bResult = (fwrite(text.c_str(), sizeof(char), text.size(), f) == text.size());
-					fclose(f);
-					return bResult;
-				}
 				return false;
 			}
-		}			
-		
+
+			const size_t written = fwrite(text.data(), sizeof(char), text.size(), f);
+			fclose(f);
+			return written == text.size();
+		}
+
 		if (password.empty())
 		{
- 			password = GetNewPasswordDlg();
+			password = GetNewPasswordDlg();
 			if (password.empty())
 			{
 				return false;
@@ -270,49 +340,30 @@ namespace Utils
 		std::string data = "";
 		if (!text.empty())
 		{
-			Utils::EncryptString(text, password, data);
+			AESLayer::KdfMode kdfMode = AESLayer::KdfMode::Scrypt;
+			if (wintraits != nullptr)
+			{
+				kdfMode = ParseKdfModeValue(wintraits->m_nKdfMode);
+			}
+			Utils::EncryptString(text, password, data, kdfMode);
 		}
 		else
 		{
 			Utils::MessageBox(hWnd, WSTR(IDS_TEXT_IS_ENCRYPTED), MB_OK | MB_ICONINFORMATION);
 		}
 
-		char szModulePath[MAX_PATH] = {'\0'};
+		std::array<char, MAX_PATH> modulePath{};
+		::GetModuleFileNameA(Utils::GetModuleHandle(), modulePath.data(), static_cast<DWORD>(modulePath.size()));
+		if (!::CopyFileA(modulePath.data(), path.c_str(), FALSE))
+		{
+			return false;
+		}
 
-		::GetModuleFileNameA(Utils::GetModuleHandle(), szModulePath, MAX_PATH);
-		::CopyFileA(szModulePath, filepath.c_str(), FALSE);	
-		bool bResult = Utils::UpdateResource(filepath.c_str(), "CONTENT", "PAYLOAD", data);
+		bool bResult = Utils::UpdateResource(path, "CONTENT", "PAYLOAD", data);
 
 		if (wintraits)
 		{
-			// write window sizes to resource
-			std::string sizeinfo;
-			char szSizeInfo[MAX_PATH] = "";
-			sprintf_s(szSizeInfo, MAX_PATH, "%d", wintraits->m_nWindowSizeX);
-			sizeinfo = szSizeInfo;
-			Utils::UpdateResource(filepath.c_str(), "SIZEX", "INFORMATION", sizeinfo);
-			sprintf_s(szSizeInfo, MAX_PATH, "%d", wintraits->m_nWindowSizeY);
-			sizeinfo = szSizeInfo;
-			Utils::UpdateResource(filepath.c_str(), "SIZEY", "INFORMATION", sizeinfo);
-		
-			// write font size
-			std::string fontsize;
-			char szFontSize[MAX_PATH] = "";
-			sprintf_s(szFontSize, MAX_PATH, "%d", wintraits->m_nFontSize);
-			fontsize = szFontSize;
-			Utils::UpdateResource(filepath.c_str(), "FONTSIZE", "INFORMATION", fontsize);
-
-			// write font typeface
-			Utils::UpdateResource(filepath.c_str(), "TYPEFACE", "INFORMATION", wintraits->m_strFontName);
-
-			// write language code if changed
-			int langid = wintraits->m_nLangId;
-			if (langid != 0)
-			{
-				std::stringstream sslanguage;
-				sslanguage << langid;
-				Utils::UpdateResource(filepath.c_str(), "LANGID", "INFORMATION", sslanguage.str());
-			}
+			bResult &= WriteWinTraitsResources(path, *wintraits);
 		}
 
 		return bResult;

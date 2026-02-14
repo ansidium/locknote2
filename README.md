@@ -18,22 +18,29 @@ Official binary executable - https://go.steganos.com/productpage_locknote2_downl
 Build Notes
 -----------
 
-LockNote 2 builds with Microsoft Visual Studio 2022.
+LockNote 2 builds with Microsoft Visual Studio 2022 (v143 toolset).
 
 The LockNote 2 source has following dependencies:
 
-* CryptoPP 8.7.0, available at http://www.cryptopp.com/.
-  The source must reside in the cryptopp subdirectory, and a compiled libfile
-  named 'cryptlib.lib' must reside in the following locations for Debug and Release:
-  ```cryptopp/output/win32/debug/cryptlib.lib``` (Debug)
-  ```cryptopp/output/win32/release/cryptlib.lib``` (Release)
+* CryptoPP (from vcpkg manifest)
+* WTL 10 (from vcpkg manifest)
 
-* WTL 10, available at http://wtl.sourceforge.net/.
-  The WTL include files must reside in the wtl10 subdirectory.
+Dependencies are restored automatically through `vcpkg.json` when opening the
+solution in Visual Studio with vcpkg integration enabled.
 
 
 History
 -------
+
+* 2.1.0, 2026/02/14:
+	- NEW: Added vcpkg manifest mode build integration (PR #6 backport)
+	- NEW: Runtime-selectable KDF profile (scrypt or PBKDF2-SHA256)
+	- NEW: Added Ctrl+S quick save command
+	- FIX: Removed online/ad menu actions from runtime UI
+	- FIX: Closing after window resize no longer asks to save unchanged text
+	- FIX: Hardened encryption/decryption checks (constant-time MAC compare and strict PKCS#7 validation)
+	- FIX: Reworked unsafe string/buffer writes and corrected `.txt` write mode
+	- FIX: Updated project security defaults (ASLR/DEP/CFG/SDL, C++20, modern include paths)
 
 * 2.0.3, 2024/03/13:
 	- NEW: new, clearer icon

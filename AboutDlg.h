@@ -17,7 +17,6 @@
 
 #pragma once
 
-#include <sstream>
 #include <string>
 
 #include "utils.h"
@@ -33,7 +32,6 @@ public:
 		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnCtrlColor)
 		COMMAND_ID_HANDLER(IDOK, OnCloseCmd)
 		COMMAND_ID_HANDLER(IDCANCEL, OnCloseCmd)
-		COMMAND_ID_HANDLER(IDC_VISIT_WEBSITE, OnVisitWebsite)
 	END_MSG_MAP()
 
 // Handler prototypes (uncomment arguments if needed):
@@ -129,8 +127,8 @@ public:
 			return TRUE;
 		}
 		SendDlgItemMessage(IDC_STATIC, STM_SETIMAGE, IMAGE_BITMAP, (LPARAM)bmp);
-		SetDlgItemText(IDC_VISIT_WEBSITE, WSTR(IDS_VISIT_WEBSITE).c_str());
-		
+		GetDlgItem(IDC_VISIT_WEBSITE).ShowWindow(SW_HIDE);
+
 		// set utf-8 to unicode converted window title
 		SetWindowText(WSTR(IDS_ABOUT_TITLE).c_str());
 
@@ -142,13 +140,7 @@ public:
 		// set background mode and text color
 		SetBkMode((HDC)wParam, TRANSPARENT); // transparent background
 
-		return (LRESULT)CreateSolidBrush(RGB(239, 244, 249)); // Windows 11 default window bg color
-	}
-
-	LRESULT OnVisitWebsite(WORD /*wNotifyCode*/, WORD wID, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
-	{
-		::ShellExecuteA(*this, "open", "https://steganos.com/locknote", NULL, NULL, SW_SHOW);
-		return 0;
+		return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
 	}
 
 	LRESULT OnCloseCmd(WORD /*wNotifyCode*/, WORD wID, HWND /*hWndCtl*/, BOOL& /*bHandled*/)

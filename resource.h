@@ -71,6 +71,9 @@
 #define ID_FONT_CONSOLAS                32591
 #define ID_FONT_CASCADIA_CODE           32592
 #define ID_CHANGE_LANGUAGE	            32593
+#ifndef ID_FILE_SAVE
+#define ID_FILE_SAVE                    57603
+#endif
 #define ID_EDIT_SELECTALL               32772
 #define ID_FILE_CHANGEPASSWORD          32775
 #define ID_Menu                         32778

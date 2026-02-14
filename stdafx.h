@@ -17,12 +17,17 @@
 
 #pragma once
 
-// Change these values to use different versions
-//#define _WIN32_WINNT		0x0501
-//#define _WIN32_WINNT_WINXP	0x0501
-//#define WINVER				_WIN32_WINNT_WINXP
-#define _WIN32_IE			0x0600
-#define _RICHEDIT_VER		0x0300
+// Windows 10+ API baseline (Windows 11 25H2 is fully covered).
+#ifndef WINVER
+#define WINVER 0x0A00
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+#ifndef _WIN32_IE
+#define _WIN32_IE 0x0A00
+#endif
+#define _RICHEDIT_VER 0x0500
 
 #include <atlbase.h>
 #include <atlapp.h>
@@ -34,8 +39,8 @@ extern CAppModule _Module;
 
 #define CRYPTOPP_DEFAULT_NO_DLL
 
-#include "default.h"
-#include "hex.h"
-#include "randpool.h"
-#include "osrng.h"
+#include "cryptopp/default.h"
+#include "cryptopp/hex.h"
+#include "cryptopp/randpool.h"
+#include "cryptopp/osrng.h"
 #include "aeslayer.h"

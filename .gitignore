@@ -1,0 +1,35 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+ipch/
+
+# Build outputs
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Ww]in32/
+out/
+build/
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.log
+*.tlog
+
+# vcpkg manifest mode
+vcpkg_installed/
+vcpkg-manifest-install.log
+
+# Runtime artifacts
+*.tmp
+*.bak

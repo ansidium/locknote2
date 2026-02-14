@@ -20,9 +20,3 @@
 #if (_ATL_VER < 0x0700)
 #include <atlimpl.cpp>
 #endif //(_ATL_VER < 0x0700)
-
-#ifdef _DEBUG
-	#pragma comment(lib, "cryptopp/output/win32/debug/cryptlib.lib")
-#else
-	#pragma comment(lib, "cryptopp/output/win32/release/cryptlib.lib")
-#endif

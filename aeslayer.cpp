@@ -1,157 +1,321 @@
+#include <array>
+#include <vector>
+#include <cstring>
+#include <algorithm>
 
-#include <iostream>
-
-// CryptoPP includes
-#include "sha.h"
-#include "pwdbased.h"
-#include "scrypt.h"
-#include "aes.h"
-#include "modes.h"
-#include "hmac.h"
+#include "cryptopp/sha.h"
+#include "cryptopp/pwdbased.h"
+#include "cryptopp/scrypt.h"
+#include "cryptopp/aes.h"
+#include "cryptopp/modes.h"
+#include "cryptopp/hmac.h"
+#include "cryptopp/misc.h"
 
 #include "aeslayer.h"
 
-#include "hex.h"
-#include "files.h"
-
-using namespace std;
-
 NAMESPACE_BEGIN(CryptoPP)
 
-// encryption function:
-// use PKCS#7 padding to align to block size for AES CBC mode
-// derive a key from a salted passphrase using PBKDF2 or SCrypt
-// encrypt-then-mac using HMAC-SHA256
-// MAC is generated over ciphertext and IV
-unsigned int AESLayer::Encrypt(RandomNumberGenerator& rng, ConstByteArrayParameter const& passphrase, byte* output, const std::string& plaintext)
+namespace
 {
-	// determine number of bytes for PKCS#7 padding
-	unsigned int padding_length = AES::BLOCKSIZE - (plaintext.size() % AES::BLOCKSIZE);
-	unsigned int padded_size = plaintext.size() + padding_length;
+	constexpr std::array<byte, AESLayer::FORMAT_HEADER_SIZE - 1> kFormatMagic{ 'L', 'N', '2', 0x02 };
+	constexpr unsigned int kScryptBlockSize = 8;
+	constexpr unsigned int kScryptParallelization = 5;
+	constexpr unsigned int kIvDerivationCost = 2;
 
-	// pad plain text with (padding_length * <value of padding_length>)
-	//std::unique_ptr<char>out_buffer = std::make_unique<char>(padded_size + 1);
-	byte* out_buffer = new byte[padded_size];
-	memset(out_buffer, 0, padded_size);
-	memcpy_s(out_buffer, padded_size, plaintext.c_str(), plaintext.size());
+	bool IsKnownKdfMode(const byte modeValue)
+	{
+		return modeValue == static_cast<byte>(AESLayer::KdfMode::Scrypt) ||
+			modeValue == static_cast<byte>(AESLayer::KdfMode::Pbkdf2Sha256);
+	}
 
-	// write padding bytes after end of the payload
-	memset(out_buffer + plaintext.size(), padding_length, padding_length);
-	
-	// establish ciphertext segment locations
-	byte* salt = output;
-	byte* payload = salt + AESLayer::SALT_SIZE;
-	byte* iv_seed = payload + padded_size;
-	byte* digest = iv_seed + AESLayer::IV_SEED_SIZE;
-	unsigned int output_length = (digest + HMAC<SHA256>::DIGESTSIZE) - output;
+	AESLayer::KdfMode ToKdfMode(const byte modeValue)
+	{
+		return modeValue == static_cast<byte>(AESLayer::KdfMode::Pbkdf2Sha256)
+			? AESLayer::KdfMode::Pbkdf2Sha256
+			: AESLayer::KdfMode::Scrypt;
+	}
 
-	// generate a random salt for password derivation
-	rng.GenerateBlock(salt, AESLayer::SALT_SIZE);
+	void DeriveKeyAndIv(
+		const AESLayer::KdfMode mode,
+		ConstByteArrayParameter const& passphrase,
+		const byte* salt,
+		const byte* ivSeed,
+		SecByteBlock& key,
+		SecByteBlock& iv)
+	{
+		if (mode == AESLayer::KdfMode::Pbkdf2Sha256)
+		{
+			PKCS5_PBKDF2_HMAC<SHA256> pbkdf;
+			const byte purposeUnused = 0;
+			pbkdf.DeriveKey(
+				key.begin(),
+				key.size(),
+				purposeUnused,
+				passphrase.begin(),
+				passphrase.size(),
+				salt,
+				AESLayer::SALT_SIZE,
+				AESLayer::KEY_ITERATIONS,
+				0.0);
 
-	// generate IV seed
-	rng.GenerateBlock(iv_seed, AESLayer::IV_SEED_SIZE);
+			pbkdf.DeriveKey(
+				iv.begin(),
+				iv.size(),
+				purposeUnused,
+				passphrase.begin(),
+				passphrase.size(),
+				ivSeed,
+				AESLayer::IV_SEED_SIZE,
+				AESLayer::KEY_ITERATIONS,
+				0.0);
+			return;
+		}
 
-#ifdef _KEY_DERIVATION_USE_SCRYPT
-	// derive a key from the passphrase using SCrypt
-	Scrypt scrypt;
-	SecByteBlock key(SHA256::DIGESTSIZE);
-	scrypt.DeriveKey(key.begin(), key.size(), passphrase.begin(), passphrase.size(), salt, AESLayer::SALT_SIZE, AESLayer::DERIVATION_COST, 8, 5);
-#else // use PBKDF2
-	// derive a key from the passphrase using PKBDF2 with SHA-256
-	PKCS5_PBKDF2_HMAC<SHA256> pbkdf;
-	const byte purpose_unused = 0;
-	SecByteBlock key(SHA256::DIGESTSIZE);
-	pbkdf.DeriveKey(key.begin(), key.size(), purpose_unused, passphrase.begin(), passphrase.size(), salt, AESLayer::SALT_SIZE, AESLayer::KEY_ITERATIONS, 0.0);
-#endif
+		Scrypt scrypt;
+		scrypt.DeriveKey(
+			key.begin(),
+			key.size(),
+			passphrase.begin(),
+			passphrase.size(),
+			salt,
+			AESLayer::SALT_SIZE,
+			AESLayer::DERIVATION_COST,
+			kScryptBlockSize,
+			kScryptParallelization);
 
-	// generate initialization vector from seed
-	SecByteBlock iv(AESLayer::IV_SIZE);
-#ifdef _KEY_DERIVATION_USE_SCRYPT
-	scrypt.DeriveKey(iv.begin(), iv.size(), passphrase.begin(), passphrase.size(), iv_seed, AESLayer::IV_SEED_SIZE, 2, 8, 5);
-#else
-	pbkdf.DeriveKey(iv.begin(), iv.size(), purpose_unused, passphrase.begin(), passphrase.size(), ivSeed, AESLayer::IV_SEED_SIZE, AESLayer::KEY_ITERATIONS, 0.0);
-#endif
+		scrypt.DeriveKey(
+			iv.begin(),
+			iv.size(),
+			passphrase.begin(),
+			passphrase.size(),
+			ivSeed,
+			AESLayer::IV_SEED_SIZE,
+			kIvDerivationCost,
+			kScryptBlockSize,
+			kScryptParallelization);
+	}
 
-	// instantiate encryptor using derived key and iv
-	CBC_Mode<AES>::Encryption encryptor(key.begin(), key.size(), iv.begin());
+	bool ValidatePkcs7Padding(const byte* buffer, const size_t bufferSize, size_t& plainTextLength)
+	{
+		if (buffer == nullptr || bufferSize == 0)
+		{
+			return false;
+		}
 
-	// encrypt padding and payload
-	encryptor.ProcessString(payload, (const byte*)out_buffer, padded_size);
+		const byte paddingByte = buffer[bufferSize - 1];
+		if (paddingByte == 0 || paddingByte > AES::BLOCKSIZE || paddingByte > bufferSize)
+		{
+			return false;
+		}
 
-	// calculate MAC over padded plaintext and iv seed
-	HMAC<SHA256>(key.begin(), key.size()).CalculateDigest(digest, payload, digest - payload);
+		for (size_t i = 0; i < paddingByte; ++i)
+		{
+			if (buffer[bufferSize - 1 - i] != paddingByte)
+			{
+				return false;
+			}
+		}
 
-	// clear plain text from out buffer and free
-	memset(out_buffer, 0, padded_size);
-	delete[] out_buffer;
-	out_buffer = nullptr;
+		plainTextLength = bufferSize - paddingByte;
+		return true;
+	}
 
-	return output_length;
+	bool VerifyAndDecrypt(
+		const AESLayer::KdfMode mode,
+		ConstByteArrayParameter const& passphrase,
+		const byte* authenticatedBegin,
+		const size_t authenticatedSize,
+		const byte* payload,
+		const size_t payloadSize,
+		const byte* salt,
+		const byte* ivSeed,
+		const byte* digest,
+		byte* output,
+		size_t& plainTextLength)
+	{
+		if (payloadSize == 0 || (payloadSize % AES::BLOCKSIZE) != 0)
+		{
+			return false;
+		}
+
+		SecByteBlock key(SHA256::DIGESTSIZE);
+		SecByteBlock iv(AESLayer::IV_SIZE);
+		DeriveKeyAndIv(mode, passphrase, salt, ivSeed, key, iv);
+
+		std::array<byte, HMAC<SHA256>::DIGESTSIZE> checkDigest{};
+		HMAC<SHA256>(key.begin(), key.size()).CalculateDigest(
+			checkDigest.data(),
+			authenticatedBegin,
+			authenticatedSize);
+
+		if (!VerifyBufsEqual(checkDigest.data(), digest, checkDigest.size()))
+		{
+			return false;
+		}
+
+		CBC_Mode<AES>::Decryption decryptor(key.begin(), key.size(), iv.begin());
+		decryptor.ProcessData(output, payload, payloadSize);
+
+		return ValidatePkcs7Padding(output, payloadSize, plainTextLength);
+	}
 }
 
-// decryption function
-// derive a key from a salted passphrase using PBKDF2 or SCrypt
-// check MAC tag by generating a HMAC-SHA256 over ciphertext and IV
-// then decrypt and remove padding
+unsigned int AESLayer::Encrypt(
+	RandomNumberGenerator& rng,
+	ConstByteArrayParameter const& passphrase,
+	byte* output,
+	const std::string& plaintext,
+	const EncryptionOptions& options)
+{
+	const unsigned int paddingLength = AES::BLOCKSIZE - (plaintext.size() % AES::BLOCKSIZE);
+	const unsigned int paddedSize = static_cast<unsigned int>(plaintext.size()) + paddingLength;
+
+	std::vector<byte> paddedPlainText(paddedSize, 0);
+	if (!plaintext.empty())
+	{
+		std::memcpy(paddedPlainText.data(), plaintext.data(), plaintext.size());
+	}
+	std::fill_n(paddedPlainText.data() + plaintext.size(), paddingLength, static_cast<byte>(paddingLength));
+
+	byte* authenticatedBegin = nullptr;
+	size_t authenticatedSize = 0;
+	byte* salt = nullptr;
+	byte* payload = nullptr;
+	byte* ivSeed = nullptr;
+	byte* digest = nullptr;
+
+	// Keep default scrypt output in legacy format for backward compatibility.
+	if (options.m_kdfMode == KdfMode::Scrypt)
+	{
+		salt = output;
+		payload = salt + AESLayer::SALT_SIZE;
+		ivSeed = payload + paddedSize;
+		digest = ivSeed + AESLayer::IV_SEED_SIZE;
+		authenticatedBegin = payload;
+		authenticatedSize = static_cast<size_t>(digest - payload);
+	}
+	else
+	{
+		// New payload format:
+		// [magic "LN2\x02"][kdf_mode][salt][ciphertext][iv_seed][digest]
+		byte* magic = output;
+		std::copy(kFormatMagic.begin(), kFormatMagic.end(), magic);
+		byte* modeByte = magic + kFormatMagic.size();
+		*modeByte = static_cast<byte>(options.m_kdfMode);
+		salt = modeByte + 1;
+		payload = salt + AESLayer::SALT_SIZE;
+		ivSeed = payload + paddedSize;
+		digest = ivSeed + AESLayer::IV_SEED_SIZE;
+		authenticatedBegin = output;
+		authenticatedSize = static_cast<size_t>(digest - output);
+	}
+
+	rng.GenerateBlock(salt, AESLayer::SALT_SIZE);
+	rng.GenerateBlock(ivSeed, AESLayer::IV_SEED_SIZE);
+
+	SecByteBlock key(SHA256::DIGESTSIZE);
+	SecByteBlock iv(AESLayer::IV_SIZE);
+	DeriveKeyAndIv(options.m_kdfMode, passphrase, salt, ivSeed, key, iv);
+
+	CBC_Mode<AES>::Encryption encryptor(key.begin(), key.size(), iv.begin());
+	encryptor.ProcessData(payload, paddedPlainText.data(), paddedSize);
+
+	HMAC<SHA256>(key.begin(), key.size()).CalculateDigest(
+		digest,
+		authenticatedBegin,
+		authenticatedSize);
+
+	SecureWipeBuffer(paddedPlainText.data(), paddedPlainText.size());
+
+	return static_cast<unsigned int>((digest + HMAC<SHA256>::DIGESTSIZE) - output);
+}
+
 DecodingResult AESLayer::Decrypt(ConstByteArrayParameter const& passphrase, byte* output, ConstByteArrayParameter const& input)
 {
-	if (input.size() < MINIMUM_CIPHERTEXT_LENGTH)
+	if (input.size() < LEGACY_MINIMUM_CIPHERTEXT_LENGTH)
 	{
 		return DecodingResult();
 	}
 
-	// establish locations of salt, IV seed and MAC
-	byte const* salt = input.begin();
-	byte const* payload = salt + AESLayer::SALT_SIZE;
-	byte const* digest = input.end() - HMAC<SHA256>::DIGESTSIZE;
-	byte const* iv_seed = digest - AESLayer::IV_SEED_SIZE;
+	const byte* begin = input.begin();
+	const byte* end = input.end();
 
-#ifdef _KEY_DERIVATION_USE_SCRYPT
-	// derive a key from the passphrase using SCrypt
-	Scrypt scrypt;
-	SecByteBlock key(SHA256::DIGESTSIZE);
-	scrypt.DeriveKey(key.begin(), key.size(), passphrase.begin(), passphrase.size(), salt, AESLayer::SALT_SIZE, AESLayer::DERIVATION_COST, 8, 5);
-#else // use PBKDF2
-	// derive a key from the passphrase using PKBDF2 with SHA-256
-	PKCS5_PBKDF2_HMAC<SHA256> pbkdf;
-	const byte purpose_unused = 0;
-	SecByteBlock key(SHA256::DIGESTSIZE);
-	pbkdf.DeriveKey(key.begin(), key.size(), purpose_unused, passphrase.begin(), passphrase.size(), salt, AESLayer::SALT_SIZE, AESLayer::KEY_ITERATIONS, 0.0);
-#endif
+	// Preferred modern format with embedded KDF metadata.
+	if (input.size() >= MINIMUM_CIPHERTEXT_LENGTH && std::equal(kFormatMagic.begin(), kFormatMagic.end(), begin))
+	{
+		const byte modeValue = begin[kFormatMagic.size()];
+		if (IsKnownKdfMode(modeValue))
+		{
+			const byte* salt = begin + FORMAT_HEADER_SIZE;
+			const byte* payload = salt + AESLayer::SALT_SIZE;
+			const byte* digest = end - HMAC<SHA256>::DIGESTSIZE;
+			const byte* ivSeed = digest - AESLayer::IV_SEED_SIZE;
+			if (ivSeed > payload)
+			{
+				size_t plainTextLength = 0;
+				if (VerifyAndDecrypt(
+					ToKdfMode(modeValue),
+					passphrase,
+					begin,
+					static_cast<size_t>(digest - begin),
+					payload,
+					static_cast<size_t>(ivSeed - payload),
+					salt,
+					ivSeed,
+					digest,
+					output,
+					plainTextLength))
+				{
+					return DecodingResult(plainTextLength);
+				}
+			}
+		}
+	}
 
-	// verify MAC
-	byte check_digest[HMAC<SHA256>::DIGESTSIZE];
-	HMAC<SHA256>(key.begin(), key.size()).CalculateDigest(check_digest, payload, digest - payload);
-	if (memcmp(digest, check_digest, sizeof check_digest) != 0)
+	// Legacy format fallback (without format header) for backward compatibility.
+	const byte* salt = begin;
+	const byte* payload = salt + AESLayer::SALT_SIZE;
+	const byte* digest = end - HMAC<SHA256>::DIGESTSIZE;
+	const byte* ivSeed = digest - AESLayer::IV_SEED_SIZE;
+	if (ivSeed <= payload)
 	{
 		return DecodingResult();
 	}
 
-	// generate initialization vector from seed
-	SecByteBlock iv(AESLayer::IV_SIZE);
-#ifdef _KEY_DERIVATION_USE_SCRYPT
-	scrypt.DeriveKey(iv.begin(), iv.size(), passphrase.begin(), passphrase.size(), iv_seed, AESLayer::IV_SEED_SIZE, 2, 8, 5);
-#else
-	pbkdf.DeriveKey(iv.begin(), iv.size(), purpose_unused, passphrase.begin(), passphrase.size(), ivSeed, AESLayer::IV_SEED_SIZE, AESLayer::KEY_ITERATIONS, 0.0);
-#endif
-
-	// instantiate decryptor using derived key and iv
-	CBC_Mode<AES>::Decryption decryptor(key.begin(), key.size(), iv.begin());
-
-	// determine padded length
-	unsigned int payload_len = iv_seed - payload;
-
-	if (payload_len)
+	size_t plainTextLength = 0;
+	if (VerifyAndDecrypt(
+		KdfMode::Scrypt,
+		passphrase,
+		payload,
+		static_cast<size_t>(digest - payload),
+		payload,
+		static_cast<size_t>(ivSeed - payload),
+		salt,
+		ivSeed,
+		digest,
+		output,
+		plainTextLength))
 	{
-		// decrypt payload
-		decryptor.ProcessString(output, payload, payload_len);
-
-		// see how many padding bytes we have, truncate to real payload length
-		byte pad_byte = output[payload_len - 1];
-		payload_len = payload_len - pad_byte;
+		return DecodingResult(plainTextLength);
 	}
 
-	return DecodingResult(payload_len);
+	if (VerifyAndDecrypt(
+		KdfMode::Pbkdf2Sha256,
+		passphrase,
+		payload,
+		static_cast<size_t>(digest - payload),
+		payload,
+		static_cast<size_t>(ivSeed - payload),
+		salt,
+		ivSeed,
+		digest,
+		output,
+		plainTextLength))
+	{
+		return DecodingResult(plainTextLength);
+	}
+
+	return DecodingResult();
 }
 
 NAMESPACE_END

@@ -22,6 +22,9 @@
 #include <list>
 #include <iostream>
 #include <algorithm>
+#include <array>
+#include <map>
+#include <vector>
 #include <atldlgs.h>
 //#include <windows.h>
 #include "utils.h"
@@ -65,7 +68,9 @@ public:
 	std::map<WORD, std::wstring> m_languages{ {LANG_ENGLISH, L"en_US"}, { LANG_GERMAN, L"de_DE" }, { LANG_FRENCH, L"fr_FR" }, { LANG_SPANISH, L"es_ES" }, { LANG_PORTUGUESE, L"pt_PT" }, { LANG_ITALIAN, L"it_IT" }, { LANG_DUTCH, L"nl_NL" }, { LANG_SWEDISH, L"sv_SE" }, { LANG_POLISH, L"pl_PL" }, { LANG_RUSSIAN, L"ru_RU" } };
 
 	std::string m_strFontName{ DEFAULT_FONT_NAME };
+	AESLayer::KdfMode m_kdfMode{ AESLayer::KdfMode::Scrypt };
 	bool m_bTraitsChanged{ false };
+	bool m_ignoreEditNotifications{ false };
 
 	CMainFrame()
 	{
@@ -120,6 +125,7 @@ public:
 		MESSAGE_HANDLER(WM_DROPFILES, OnDropFiles)
 		MESSAGE_HANDLER(UWM_FINDMSGSTRING, OnFindMsgString)
 		COMMAND_ID_HANDLER(ID_APP_EXIT, OnFileExit)
+		COMMAND_ID_HANDLER(ID_FILE_SAVE, OnFileSave)
 		COMMAND_ID_HANDLER(ID_FILE_CHANGEPASSWORD, OnFileChangePassword)
 		COMMAND_ID_HANDLER(ID_FILE_SAVE_AS, OnFileSaveAs)
 		COMMAND_ID_HANDLER(ID_APP_ABOUT, OnAppAbout)
@@ -152,12 +158,8 @@ public:
 		COMMAND_ID_HANDLER(LANG_SWEDISH, OnChangeLanguage)
 		COMMAND_ID_HANDLER(LANG_POLISH, OnChangeLanguage)
 		COMMAND_ID_HANDLER(LANG_RUSSIAN, OnChangeLanguage)
-		COMMAND_ID_HANDLER(ID_STEGANOS_PASSWORD_MANAGER, OnVisitSteganos)
-		COMMAND_ID_HANDLER(ID_STEGANOS_SAFE, OnVisitSteganos)
-		COMMAND_ID_HANDLER(ID_STEGANOS_PRIVACYSUITE, OnVisitSteganos)
-		COMMAND_ID_HANDLER(ID_STEGANOS_ONLINESHIELD, OnVisitSteganos)
-		COMMAND_ID_HANDLER(ID_STEGANOS_LATESTOFFERS, OnVisitSteganos)
-		COMMAND_ID_HANDLER(ID_STEGANOS_CHECKFORLOCKNOTEUPDATES, OnVisitSteganos)
+		COMMAND_ID_HANDLER(ID_STEGANOS_PASSWORD_MANAGER, OnSetEncryptionMode)
+		COMMAND_ID_HANDLER(ID_STEGANOS_SAFE, OnSetEncryptionMode)
 		
 		COMMAND_CODE_HANDLER(EN_CHANGE, OnChange)
 		CHAIN_MSG_MAP(CFrameWindowImpl<CMainFrame>)
@@ -165,17 +167,17 @@ public:
 
 	std::string GetText()
 	{
-		std::string text;
-		int nLength = m_view.GetWindowTextLength();
-		text.resize(nLength);
-		WCHAR* wszBuffer = new WCHAR[nLength + 1];
-		wszBuffer[nLength] = L'\0';
-		::GetWindowText(m_view, wszBuffer, nLength + 1);
-		text = wchar_to_utf8(wszBuffer);
-		memset(wszBuffer, 0, nLength + 1);
-		delete[]wszBuffer;
-		wszBuffer = nullptr;
-		return text;
+		const int length = m_view.GetWindowTextLength();
+		std::wstring wideText(static_cast<size_t>(length) + 1, L'\0');
+		if (length > 0)
+		{
+			::GetWindowTextW(m_view, wideText.data(), length + 1);
+		}
+		if (!wideText.empty() && wideText.back() == L'\0')
+		{
+			wideText.pop_back();
+		}
+		return wstring_to_utf8(wideText);
 	}
 
 	bool SaveTextToFile(const std::string& path, const std::string& text, std::string& password, HWND hWnd = 0)
@@ -185,8 +187,27 @@ public:
 		wintraits.m_nWindowSizeX = m_nWindowSizeX;
 		wintraits.m_nWindowSizeY = m_nWindowSizeY;
 		wintraits.m_nLangId = m_nLanguage;
+		wintraits.m_nKdfMode = static_cast<int>(m_kdfMode);
 		wintraits.m_strFontName = m_strFontName;
 		return Utils::SaveTextToFile(path, text, password, *this, &wintraits);
+	}
+
+	void SetKdfMode(const int rawMode)
+	{
+		m_kdfMode = Utils::ParseKdfModeValue(rawMode);
+	}
+
+	int GetKdfMode() const
+	{
+		return static_cast<int>(m_kdfMode);
+	}
+
+	void SetViewTextWithoutTracking(const std::string& text)
+	{
+		m_ignoreEditNotifications = true;
+		m_view.SetWindowText(utf8_to_wstring(text).c_str());
+		m_view.SetModify(FALSE);
+		m_ignoreEditNotifications = false;
 	}
 
 // Handler prototypes (uncomment arguments if needed):
@@ -214,11 +235,17 @@ public:
 			column = 1;
 		}
 
-		// old but compatible...
-		std::string text;
-		text.resize(32768);
-		sprintf_s((char*)text.c_str(), text.size(), STR(IDS_STATUSBAR_STATS).c_str(), num_lines, GetText().size(), current_line_number, column);
-		SendMessage(m_hWndStatusBar, WM_SETTEXT, text.size() + 1, (LPARAM)(utf8_to_wstring(text).c_str()));
+		std::array<char, 512> statusText{};
+		sprintf_s(
+			statusText.data(),
+			statusText.size(),
+			STR(IDS_STATUSBAR_STATS).c_str(),
+			static_cast<int>(num_lines),
+			static_cast<int>(GetText().size()),
+			static_cast<int>(current_line_number),
+			static_cast<int>(column));
+		const std::wstring wideStatusText = utf8_to_wstring(statusText.data());
+		SendMessage(m_hWndStatusBar, WM_SETTEXT, wideStatusText.size() + 1, reinterpret_cast<LPARAM>(wideStatusText.c_str()));
 
 		/*std::stringstream ss;
 		ss << num_lines << _T(" lines, ") << GetText().size() << _T(" characters. Line: ");
@@ -301,11 +328,11 @@ public:
 		auto margin = MulDiv(20, dpi, 96);
 		m_view.SetMargins(margin, margin);
 
-		// reset text to force realign to margins
-		m_text = GetText();
-		if (m_text.length())
+		// Reset text to force realignment to margins without creating fake edit changes.
+		const std::string currentText = GetText();
+		if (!currentText.empty())
 		{
-			m_view.SetWindowText(utf8_to_wstring(m_text).c_str());
+			SetViewTextWithoutTracking(currentText);
 		}
 
 		if (m_nFontSize != nOldFontSize)
@@ -419,11 +446,11 @@ public:
 		auto margin = MulDiv(20, dpi, 96);
 		m_view.SetMargins(margin, margin);
 		
-		// reset text to force realign to margins
-		m_text = GetText();
-		if (m_text.length())
+		// Reset text to force realignment to margins without creating fake edit changes.
+		const std::string currentText = GetText();
+		if (!currentText.empty())
 		{
-			m_view.SetWindowText(utf8_to_wstring(m_text).c_str());
+			SetViewTextWithoutTracking(currentText);
 		}
 
 		if (strOldFontName != m_strFontName)
@@ -461,12 +488,17 @@ public:
 		bool bTextUnchanged = GetText() == STR(IDS_WELCOME);
 
 		// set UI language
+		const auto langIt = m_languages.find(wID);
+		if (langIt == m_languages.end())
+		{
+			return 0;
+		}
 		DWORD dwLanguagesSet = 1;
-		SetProcessPreferredUILanguages(MUI_LANGUAGE_NAME, m_languages[wID].c_str(), &dwLanguagesSet);
+		SetProcessPreferredUILanguages(MUI_LANGUAGE_NAME, langIt->second.c_str(), &dwLanguagesSet);
 		if (bTextUnchanged)
 		{
 			m_text = STR(IDS_WELCOME);
-			m_view.SetWindowText(utf8_to_wstring(m_text).c_str());
+			SetViewTextWithoutTracking(m_text);
 		}
 
 		// refresh all menu items
@@ -503,8 +535,12 @@ public:
 		m_nLanguage = langid;
 		if (langid != 0)
 		{
-			DWORD dwLanguagesSet = 1;
-			SetProcessPreferredUILanguages(MUI_LANGUAGE_NAME, m_languages[static_cast<WORD>(langid)].c_str(), &dwLanguagesSet);
+			const auto langIt = m_languages.find(static_cast<WORD>(langid));
+			if (langIt != m_languages.end())
+			{
+				DWORD dwLanguagesSet = 1;
+				SetProcessPreferredUILanguages(MUI_LANGUAGE_NAME, langIt->second.c_str(), &dwLanguagesSet);
+			}
 		}
 	}
 
@@ -520,16 +556,14 @@ public:
 			//std::list<std::string> decryptPasswords;
 			for (UINT uIndex = 0; uIndex < uFileCount; uIndex++)
 			{
-				std::string filename;
 				UINT uLength = DragQueryFile(hDrop, uIndex, NULL, 0);
-				filename.resize(uLength);
-				DragQueryFileA(hDrop, uIndex, (char*)filename.c_str(), uLength + 1);
-				std::string extension = filename.substr(uLength - 4, -1);
-				std::string newfilename = filename.substr(0, uLength - 4);
-				extension = str_tolower(extension);
-				if (extension == ".txt")
+				std::vector<char> fileBuffer(static_cast<size_t>(uLength) + 1, '\0');
+				DragQueryFileA(hDrop, uIndex, fileBuffer.data(), uLength + 1);
+				const std::string filename = fileBuffer.data();
+
+				if (HasExtension(filename, ".txt"))
 				{
-					//_tcscpy_s(&newfilename[uLength - 4], 4, _T(".exe"));
+					std::string newfilename = filename.substr(0, filename.size() - 4);
 					newfilename += ".exe";
 					std::string text;
 					std::string password;
@@ -549,22 +583,43 @@ public:
 				}
 				*/
 				else
-				{					
-					std::string text;
-					text.resize(32768);
-					sprintf_s((char*)text.c_str(), text.size(), STR(IDS_CANT_CONVERT).c_str(), filename.c_str());
-					Utils::MessageBox(*this, utf8_to_wstring(text), MB_OK | MB_ICONERROR);
+				{
+					std::array<char, 512> message{};
+					sprintf_s(message.data(), message.size(), STR(IDS_CANT_CONVERT).c_str(), filename.c_str());
+					Utils::MessageBox(*this, utf8_to_wstring(message.data()), MB_OK | MB_ICONERROR);
 				}
 			}
 			if (nConverted)
 			{
-				std::string text;
-				text.resize(32768);
-				sprintf_s((char*)text.c_str(), text.size(), STR(IDS_CONVERT_DONE).c_str(), nConverted);
-				Utils::MessageBox(*this, utf8_to_wstring(text), MB_OK | MB_ICONINFORMATION);
+				std::array<char, 256> message{};
+				sprintf_s(message.data(), message.size(), STR(IDS_CONVERT_DONE).c_str(), nConverted);
+				Utils::MessageBox(*this, utf8_to_wstring(message.data()), MB_OK | MB_ICONINFORMATION);
 			}
 		}
 		DragFinish(hDrop);
+		return 0;
+	}
+
+	LRESULT OnFileSave(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
+	{
+		const std::string currentText = GetText();
+		if (currentText == m_text && !m_bTraitsChanged)
+		{
+			return 0;
+		}
+
+		if (!currentText.empty() && m_password.empty())
+		{
+			m_password = GetNewPasswordDlg(*this);
+			if (m_password.empty())
+			{
+				return 0;
+			}
+		}
+
+		m_text = currentText;
+		m_view.SetModify(FALSE);
+		UpdateStatusBar();
 		return 0;
 	}
 
@@ -588,8 +643,9 @@ public:
 
 	LRESULT OnClose(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
-		std::string text = GetText();
-		if (m_text != text || (m_text != STR(IDS_WELCOME) && m_bTraitsChanged))
+		const std::string text = GetText();
+		const bool textChanged = (m_text != text);
+		if (textChanged)
 		{
 			int nResult = Utils::MessageBox(*this, WSTR(IDS_SAVE_CHANGES), MB_YESNOCANCEL | MB_ICONQUESTION);
 			if (nResult == IDCANCEL)
@@ -613,7 +669,7 @@ public:
 
 			if (m_password.empty())
 			{
-				m_password = GetNewPasswordDlg();
+				m_password = GetNewPasswordDlg(*this);
 				if (m_password.empty())
 				{
 					bHandled = TRUE;
@@ -624,6 +680,7 @@ public:
 
 		bHandled = FALSE;
 		m_text = text;
+		m_view.SetModify(FALSE);
 
 		return FALSE;
 	}
@@ -661,7 +718,7 @@ public:
 		CreateSimpleStatusBar(); //m_hWndStatusBar
 
 		m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, WS_EX_WINDOWEDGE);
-		m_view.SetLimitText((1<<31)); // allow a lot of text to be entered
+		m_view.SetLimitText(0x7ffffffe); // allow a lot of text to be entered
 
 		CClientDC dc(*this);
 		auto dpi = GetDeviceCaps(dc, LOGPIXELSY);
@@ -694,31 +751,28 @@ public:
 		auto margin = MulDiv(20, dpi, 96);
 		m_view.SetMargins(margin, margin);
 
-		if (m_text.length())
+		if (!m_text.empty())
 		{
-			m_view.SetWindowText(utf8_to_wstring(m_text).c_str());
-			//m_view.SetSelAll();
-
+			SetViewTextWithoutTracking(m_text);
 		}
 
-		std::string modulepath;
-		modulepath.resize(MAX_PATH+1);
-		std::string title;
-		::GetModuleFileNameA(Utils::GetModuleHandle(), (char*)modulepath.c_str(), MAX_PATH);
-		int nSlashPos = modulepath.rfind("\\");
-		if (nSlashPos != -1)
+		std::array<char, MAX_PATH> modulePath{};
+		::GetModuleFileNameA(Utils::GetModuleHandle(), modulePath.data(), static_cast<DWORD>(modulePath.size()));
+
+		std::string title = modulePath.data();
+		const size_t nSlashPos = title.find_last_of('\\');
+		if (nSlashPos != std::string::npos)
 		{
-			title = &modulepath[nSlashPos+1];
-			int nDotPos = title.rfind(".");
-			if (nDotPos != -1)
-			{
-				title[nDotPos] = '\0';
-			}
+			title = title.substr(nSlashPos + 1);
+		}
+		const size_t nDotPos = title.find_last_of('.');
+		if (nDotPos != std::string::npos)
+		{
+			title = title.substr(0, nDotPos);
 		}
 
-		std::string windowtitle;
-		windowtitle.resize(MAX_PATH + 100);
-		sprintf_s((char*)windowtitle.c_str(), MAX_PATH + 100, "%s - %s", title.c_str(), STR(IDR_MAINFRAME).c_str());
+		std::array<char, MAX_PATH + 100> windowTitle{};
+		sprintf_s(windowTitle.data(), windowTitle.size(), "%s - %s", title.c_str(), STR(IDR_MAINFRAME).c_str());
 
 		// register object for message filtering and idle updates
 		CMessageLoop* pLoop = _Module.GetMessageLoop();
@@ -728,6 +782,7 @@ public:
 
 		m_currentBuffer.m_strText = GetText();
 		m_view.GetSel(m_currentBuffer.m_nStartChar, m_currentBuffer.m_nEndChar);
+		m_view.SetModify(FALSE);
 
 		UpdateControlItemTexts();
 
@@ -746,7 +801,7 @@ public:
 
 		m_view.SetSel(m_currentBuffer.m_nStartChar + 2, m_currentBuffer.m_nStartChar + 2);
 
-		SetWindowText(utf8_to_wstring(windowtitle).c_str());
+		SetWindowText(utf8_to_wstring(windowTitle.data()).c_str());
 
 		UpdateStatusBar();
 
@@ -779,46 +834,131 @@ public:
 		ChangeMenuItemText(ID_MENU_FONT_SIZE, WSTR(IDS_MENU_FONT_SIZE));
 		ChangeMenuItemText(ID_MENU_HELP, WSTR(IDS_MENU_HELP));
 		ChangeMenuItemText(ID_APP_ABOUT, WSTR(IDS_ABOUT_TITLE));
-		ChangeMenuItemText(ID_STEGANOS_PASSWORD_MANAGER, WSTR(IDS_MENUITEM_SPM));
-		ChangeMenuItemText(ID_STEGANOS_SAFE, WSTR(IDS_MENUITEM_SAFE));
-		ChangeMenuItemText(ID_STEGANOS_PRIVACYSUITE, WSTR(IDS_MENUITEM_SSS));
-		ChangeMenuItemText(ID_STEGANOS_ONLINESHIELD, WSTR(IDS_MENUITEM_SOS));
-		ChangeMenuItemText(ID_STEGANOS_LATESTOFFERS, WSTR(IDS_MENUITEM_LATEST));
-		ChangeMenuItemText(ID_STEGANOS_CHECKFORLOCKNOTEUPDATES, WSTR(IDS_MENUITEM_CHECKUPDATE));
+		ConfigureEncryptionMenu();
+		UpdateEncryptionMenuChecks();
+	}
+
+	void ConfigureEncryptionMenu()
+	{
+		HMENU hMenu = GetMenu();
+		if (hMenu == nullptr)
+		{
+			return;
+		}
+
+		const std::array<UINT, 4> menuItemsToRemove{
+			ID_STEGANOS_PRIVACYSUITE,
+			ID_STEGANOS_ONLINESHIELD,
+			ID_STEGANOS_LATESTOFFERS,
+			ID_STEGANOS_CHECKFORLOCKNOTEUPDATES
+		};
+		for (const UINT id : menuItemsToRemove)
+		{
+			RemoveMenu(hMenu, id, MF_BYCOMMAND);
+		}
+
+		for (int topIndex = 0; topIndex < GetMenuItemCount(hMenu); ++topIndex)
+		{
+			HMENU hSubMenu = GetSubMenu(hMenu, topIndex);
+			if (hSubMenu == nullptr)
+			{
+				continue;
+			}
+
+			const bool hasEncryptionItems =
+				GetMenuState(hSubMenu, ID_STEGANOS_PASSWORD_MANAGER, MF_BYCOMMAND) != static_cast<UINT>(-1) ||
+				GetMenuState(hSubMenu, ID_STEGANOS_SAFE, MF_BYCOMMAND) != static_cast<UINT>(-1);
+			if (!hasEncryptionItems)
+			{
+				continue;
+			}
+
+			// Reuse the former "Steganos" submenu as a local encryption settings menu.
+			MENUITEMINFOW topMenuInfo{ sizeof(topMenuInfo) };
+			topMenuInfo.fMask = MIIM_STRING;
+			topMenuInfo.dwTypeData = const_cast<LPWSTR>(L"Encryption");
+			SetMenuItemInfoW(hMenu, topIndex, TRUE, &topMenuInfo);
+
+			for (int pos = GetMenuItemCount(hSubMenu) - 1; pos >= 0; --pos)
+			{
+				if ((GetMenuState(hSubMenu, pos, MF_BYPOSITION) & MF_SEPARATOR) != 0)
+				{
+					RemoveMenu(hSubMenu, pos, MF_BYPOSITION);
+				}
+			}
+			break;
+		}
+
+		ChangeMenuItemText(ID_STEGANOS_PASSWORD_MANAGER, L"Modern encryption (scrypt)");
+		ChangeMenuItemText(ID_STEGANOS_SAFE, L"Compatibility encryption (PBKDF2-SHA256)");
+		DrawMenuBar();
+	}
+
+	void UpdateEncryptionMenuChecks()
+	{
+		HMENU hMenu = GetMenu();
+		if (hMenu == nullptr)
+		{
+			return;
+		}
+
+		CMenuHandle menu(hMenu);
+		menu.CheckMenuItem(
+			ID_STEGANOS_PASSWORD_MANAGER,
+			MF_BYCOMMAND | (m_kdfMode == AESLayer::KdfMode::Scrypt ? MF_CHECKED : MF_UNCHECKED));
+		menu.CheckMenuItem(
+			ID_STEGANOS_SAFE,
+			MF_BYCOMMAND | (m_kdfMode == AESLayer::KdfMode::Pbkdf2Sha256 ? MF_CHECKED : MF_UNCHECKED));
 	}
 
 	// change the text of the given menu
 	void ChangeMenuText(const UINT& menupos, const std::wstring& strNewText)
 	{
 		HMENU hMenu = GetMenu();
-		MENUITEMINFO mii{ sizeof(MENUITEMINFO) };
-		GetMenuItemInfo(hMenu, menupos, TRUE, &mii);
-		mii.dwTypeData = (LPWSTR)strNewText.c_str();
-		mii.fMask = MIIM_TYPE | MIIM_DATA;
-		SetMenuItemInfo(hMenu, menupos, TRUE, &mii);
+		if (hMenu == nullptr)
+		{
+			return;
+		}
+
+		MENUITEMINFOW mii{ sizeof(mii) };
+		mii.fMask = MIIM_STRING;
+		mii.dwTypeData = const_cast<LPWSTR>(strNewText.c_str());
+		SetMenuItemInfoW(hMenu, menupos, TRUE, &mii);
 	}
 
 	// change the text of the given menu's submenu
 	void ChangeSubMenuText(const UINT& menupos, const UINT& submenupos, const std::wstring& strNewText)
 	{
 		HMENU hMenu = GetMenu();
+		if (hMenu == nullptr)
+		{
+			return;
+		}
 		HMENU hSubMenu = GetSubMenu(hMenu, menupos);
-		MENUITEMINFO mii{ sizeof(MENUITEMINFO) };
-		GetMenuItemInfo(hSubMenu, submenupos, TRUE, &mii);
-		mii.dwTypeData = (LPWSTR)strNewText.c_str();
-		mii.fMask = MIIM_TYPE | MIIM_DATA;
-		SetMenuItemInfo(hSubMenu, submenupos, TRUE, &mii);
+		if (hSubMenu == nullptr)
+		{
+			return;
+		}
+
+		MENUITEMINFOW mii{ sizeof(mii) };
+		mii.fMask = MIIM_STRING;
+		mii.dwTypeData = const_cast<LPWSTR>(strNewText.c_str());
+		SetMenuItemInfoW(hSubMenu, submenupos, TRUE, &mii);
 	}
 
 	// change the text of the given menu item
 	void ChangeMenuItemText(const UINT& id, const std::wstring& strNewText)
 	{
 		HMENU hMenu = GetMenu();
-		MENUITEMINFO mii{ sizeof(MENUITEMINFO) };
-		GetMenuItemInfo(hMenu, id, 0, &mii);
-		mii.dwTypeData = (LPWSTR)strNewText.c_str();
-		mii.fMask = MIIM_TYPE | MIIM_DATA;
-		SetMenuItemInfo(hMenu, id, 0, &mii);
+		if (hMenu == nullptr)
+		{
+			return;
+		}
+
+		MENUITEMINFOW mii{ sizeof(mii) };
+		mii.fMask = MIIM_STRING;
+		mii.dwTypeData = const_cast<LPWSTR>(strNewText.c_str());
+		SetMenuItemInfoW(hMenu, id, FALSE, &mii);
 	}
 
 	LRESULT OnEditCopy(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
@@ -853,7 +993,7 @@ public:
 			UndoBuffer undo = m_listUndo.back();
 			m_listUndo.pop_back();
 			m_currentBuffer = undo;
-			m_view.SetWindowText(utf8_to_wstring(m_currentBuffer.m_strText).c_str());
+			SetViewTextWithoutTracking(m_currentBuffer.m_strText);
 			m_view.SetSel(m_currentBuffer.m_nStartChar, m_currentBuffer.m_nEndChar);
 		}
 		return 0;
@@ -875,43 +1015,41 @@ public:
 	}	
 
 	void FindNext()
-	{		
-		int nBegin, nEnd;
-		std::string text;
-		std::string searchtext;
-		std::wstring wtext;
-		std::wstring wsearchtext;
-		text = GetText();
-		searchtext = m_strSearchString;
+	{
+		int nBegin = 0;
+		int nEnd = 0;
+		std::string text = GetText();
+		std::string searchtext = m_strSearchString;
 		if (!(m_dwSearchFlags & FR_MATCHCASE))
 		{
 			text = str_tolower(text);
 			searchtext = str_tolower(searchtext);
 		}
-		wtext = utf8_to_wstring(text);
-		wsearchtext = utf8_to_wstring(searchtext);
+		const std::wstring wtext = utf8_to_wstring(text);
+		const std::wstring wsearchtext = utf8_to_wstring(searchtext);
 		m_view.GetSel(nBegin, nEnd);
-		
-		int nIndex;
+
+		size_t nIndex = std::wstring::npos;
 		if (!(m_dwSearchFlags & FR_DOWN))
 		{
-			nIndex = wtext.rfind(wsearchtext, nBegin-1);
-			if (nIndex == -1)
+			const size_t lookupPos = nBegin > 0 ? static_cast<size_t>(nBegin - 1) : std::wstring::npos;
+			nIndex = wtext.rfind(wsearchtext, lookupPos);
+			if (nIndex == std::wstring::npos)
 			{
-				nIndex = wtext.rfind(wsearchtext, -1);
+				nIndex = wtext.rfind(wsearchtext);
 			}
 		}
 		else
 		{
-			nIndex = wtext.find(wsearchtext, nEnd);
-			if (nIndex == -1)
+			nIndex = wtext.find(wsearchtext, static_cast<size_t>(nEnd));
+			if (nIndex == std::wstring::npos)
 			{
 				nIndex = wtext.find(wsearchtext, 0);
 			}
 		}
-		if (nIndex != -1)
+		if (nIndex != std::wstring::npos)
 		{
-			m_view.SetSel(nIndex, nIndex + wcslen(wsearchtext.c_str()));
+			m_view.SetSel(static_cast<int>(nIndex), static_cast<int>(nIndex + wsearchtext.size()));
 		}
 		else
 		{
@@ -973,6 +1111,11 @@ public:
 
 	LRESULT OnChange(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 	{
+		if (m_ignoreEditNotifications)
+		{
+			return 0;
+		}
+
 		if (m_listUndo.size() >= 1000)
 		{
 			m_listUndo.pop_front();
@@ -1020,30 +1163,18 @@ public:
 		return 0;
 	}
 
-	LRESULT OnVisitSteganos(WORD /*wNotifyCode*/, WORD wID, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
+	LRESULT OnSetEncryptionMode(WORD /*wNotifyCode*/, WORD wID, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 	{
-		switch (wID)
+		const AESLayer::KdfMode oldMode = m_kdfMode;
+		m_kdfMode = (wID == ID_STEGANOS_SAFE)
+			? AESLayer::KdfMode::Pbkdf2Sha256
+			: AESLayer::KdfMode::Scrypt;
+
+		if (m_kdfMode != oldMode)
 		{
-		case ID_STEGANOS_PASSWORD_MANAGER:
-			::ShellExecuteA(*this, "open", "https://steganos.com/spm", NULL, NULL, SW_SHOW);
-			break;
-		case ID_STEGANOS_SAFE:
-			::ShellExecuteA(*this, "open", "https://steganos.com/safe", NULL, NULL, SW_SHOW);
-			break;
-		case ID_STEGANOS_PRIVACYSUITE:
-			::ShellExecuteA(*this, "open", "https://steganos.com/sss", NULL, NULL, SW_SHOW);
-			break;
-		case ID_STEGANOS_ONLINESHIELD:
-			::ShellExecuteA(*this, "open", "https://steganos.com/sos", NULL, NULL, SW_SHOW);
-			break;
-		case ID_STEGANOS_LATESTOFFERS:
-			::ShellExecuteA(*this, "open", "https://store.steganos.com/1234/purl-LNOFFER", NULL, NULL, SW_SHOW);
-			break;
-		case ID_STEGANOS_CHECKFORLOCKNOTEUPDATES:
-		default:
-			::ShellExecuteA(*this, "open", "https://steganos.com/locknote", NULL, NULL, SW_SHOW);
-			break;
+			m_bTraitsChanged = true;
 		}
+		UpdateEncryptionMenuChecks();
 		return 0;
 	}
 };

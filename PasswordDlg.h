@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include "utils.h"
 
 class CPasswordDlg : public CDialogImpl<CPasswordDlg>
@@ -72,14 +74,19 @@ public:
 
 	LRESULT OnCloseCmd(WORD /*wNotifyCode*/, WORD wID, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 	{
-		std::wstring strPassword1;
-		std::wstring strPassword2;
-		strPassword1.resize(256);
-		strPassword2.resize(256);
-		GetDlgItemText(IDC_PASSWORD1, (TCHAR*)strPassword1.c_str(), 256);
-		GetDlgItemText(IDC_PASSWORD2, (TCHAR*)strPassword2.c_str(), 256);
-		m_strPassword1 = wstring_to_utf8(strPassword1);
-		m_strPassword2 = wstring_to_utf8(strPassword2);
+		const int password1Length = GetDlgItemTextLength(IDC_PASSWORD1);
+		const int password2Length = GetDlgItemTextLength(IDC_PASSWORD2);
+		std::vector<wchar_t> password1(static_cast<size_t>(password1Length) + 1, L'\0');
+		std::vector<wchar_t> password2(static_cast<size_t>(password2Length) + 1, L'\0');
+
+		GetDlgItemText(IDC_PASSWORD1, password1.data(), static_cast<int>(password1.size()));
+		GetDlgItemText(IDC_PASSWORD2, password2.data(), static_cast<int>(password2.size()));
+
+		m_strPassword1 = wchar_to_utf8(password1.data());
+		m_strPassword2 = wchar_to_utf8(password2.data());
+
+		SecureZeroMemory(password1.data(), password1.size() * sizeof(wchar_t));
+		SecureZeroMemory(password2.data(), password2.size() * sizeof(wchar_t));
 		EndDialog(wID);
 		return 0;
 	}

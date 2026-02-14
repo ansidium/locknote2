@@ -22,19 +22,77 @@
 #include <atldlgs.h>
 
 #include <process.h>
+#include <array>
 
 #include <atlfile.h>
 
 #include "resource.h"
 
 #include "locknoteView.h"
-#include "aboutdlg.h"
-#include "passworddlg.h"
+#include "AboutDlg.h"
+#include "PasswordDlg.h"
 #include "MainFrm.h"
 
 #include "aeslayer.cpp" // prevents having to include precompiled header in aeslayer.cpp
 
 CAppModule _Module;
+
+namespace
+{
+	bool StageWritebackFromMainFrame(const CMainFrame& wndMain, std::string password)
+	{
+		std::string encryptedData;
+		if (!wndMain.m_text.empty())
+		{
+			Utils::EncryptString(
+				wndMain.m_text,
+				password,
+				encryptedData,
+				Utils::ParseKdfModeValue(wndMain.GetKdfMode()));
+		}
+		else
+		{
+			Utils::MessageBox(nullptr, WSTR(IDS_TEXT_IS_ENCRYPTED), MB_OK | MB_ICONINFORMATION);
+		}
+
+		std::array<char, MAX_PATH> modulePath{};
+		std::array<char, MAX_PATH> tempPath{};
+		std::array<char, MAX_PATH> fileName{};
+
+		::GetModuleFileNameA(Utils::GetModuleHandle(), modulePath.data(), static_cast<DWORD>(modulePath.size()));
+		::GetTempPathA(static_cast<DWORD>(tempPath.size()), tempPath.data());
+		::GetTempFileNameA(tempPath.data(), "STG", 0, fileName.data());
+		if (!::CopyFileA(modulePath.data(), fileName.data(), FALSE))
+		{
+			return false;
+		}
+
+		bool writeResult = Utils::UpdateResource(fileName.data(), "CONTENT", "PAYLOAD", encryptedData);
+
+		LOCKNOTEWINTRAITS traits{};
+		traits.m_nWindowSizeX = wndMain.m_nWindowSizeX;
+		traits.m_nWindowSizeY = wndMain.m_nWindowSizeY;
+		traits.m_nFontSize = wndMain.m_nFontSize;
+		traits.m_nLangId = wndMain.GetLanguage();
+		traits.m_nKdfMode = wndMain.GetKdfMode();
+		traits.m_strFontName = wndMain.m_strFontName;
+		writeResult &= Utils::WriteWinTraitsResources(fileName.data(), traits);
+
+		if (!writeResult)
+		{
+			return false;
+		}
+
+		_tspawnl(
+			_P_NOWAIT,
+			utf8_to_wstring(fileName.data()).c_str(),
+			utf8_to_wstring(Utils::Quote(fileName.data())).c_str(),
+			_T("-writeback"),
+			utf8_to_wstring(Utils::Quote(modulePath.data())).c_str(),
+			nullptr);
+		return true;
+	}
+}
 
 int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 {
@@ -84,16 +142,12 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 		{
 			int nConverted = 0;
 			std::string encryptPassword;
-			//std::list<std::string> decryptPasswords;
 			for (int nIndex = 1; nIndex < __argc; nIndex++)
 			{
-				std::string filename = __argv[nIndex];
-				UINT uLength = filename.size();
-				std::string extension = filename.substr(uLength - 4, -1);
-				std::string newfilename = filename.substr(0, uLength - 4);
-				extension = str_tolower(extension);
-				if (extension == ".txt")
+				const std::string filename = __argv[nIndex];
+				if (HasExtension(filename, ".txt"))
 				{
+					std::string newfilename = filename.substr(0, filename.size() - 4);
 					newfilename += ".exe";
 					std::string text;
 					std::string password;
@@ -105,27 +159,20 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 						}
 					}
 				}
-				/*
-				// convert SLIM back to text
-				else if (extension == _T(".exe"))
-				{
-					_tcscpy(&newfilename[uLength-4], _T(".txt"));
-				}
-				*/
 				else
-				{					
-					std::wstring text;
-					text.resize(32768);
-					swprintf_s((TCHAR*)text.c_str(), 32768, WSTR(IDS_CANT_CONVERT).c_str(), filename.c_str());
-					Utils::MessageBox(NULL, text, MB_OK | MB_ICONERROR);
+				{
+					std::array<wchar_t, 512> message{};
+					const std::wstring wideFilename = utf8_to_wstring(filename);
+					swprintf_s(message.data(), message.size(), WSTR(IDS_CANT_CONVERT).c_str(), wideFilename.c_str());
+					Utils::MessageBox(NULL, message.data(), MB_OK | MB_ICONERROR);
 				}
 			}
+
 			if (nConverted)
 			{
-				std::wstring text;
-				text.resize(32768);
-				swprintf_s((TCHAR*)text.c_str(), 32768, WSTR(IDS_CONVERT_DONE).c_str(), nConverted);
-				Utils::MessageBox(NULL, text, MB_OK | MB_ICONINFORMATION);
+				std::array<wchar_t, 256> message{};
+				swprintf_s(message.data(), message.size(), WSTR(IDS_CONVERT_DONE).c_str(), nConverted);
+				Utils::MessageBox(NULL, message.data(), MB_OK | MB_ICONINFORMATION);
 			}
 		}
 
@@ -186,19 +233,22 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 	std::string strSizeY;
 	Utils::LoadResource("SIZEX", "INFORMATION", strSizeX);
 	Utils::LoadResource("SIZEY", "INFORMATION", strSizeY);
-	if (!strSizeX.empty() && !strSizeY.empty())
+	int parsedValue = 0;
+	if (Utils::TryParseInt(strSizeX, parsedValue))
 	{
-		wndMain.m_nWindowSizeX = atoi(strSizeX.c_str());
-		wndMain.m_nWindowSizeY = atoi(strSizeY.c_str());
+		wndMain.m_nWindowSizeX = parsedValue;
+	}
+	if (Utils::TryParseInt(strSizeY, parsedValue))
+	{
+		wndMain.m_nWindowSizeY = parsedValue;
 	}
 
 	// get font size
 	std::string fontsize;
 	Utils::LoadResource("FONTSIZE", "INFORMATION", fontsize);
-	if (!fontsize.empty())
+	if (Utils::TryParseInt(fontsize, parsedValue))
 	{
-		// fontsize format: 10 (example)
-		wndMain.m_nFontSize = atoi(fontsize.c_str());
+		wndMain.m_nFontSize = parsedValue;
 	}
 	else
 	{
@@ -221,14 +271,24 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 	// get language id
 	std::string language;
 	Utils::LoadResource("LANGID", "INFORMATION", language);
-	if (!language.empty())
+	if (Utils::TryParseInt(language, parsedValue))
 	{
-		// language id format: 409 (example)
-		wndMain.SetLanguage(atoi(language.c_str()));
+		wndMain.SetLanguage(parsedValue);
 	}
 	else
 	{
 		wndMain.SetLanguage(0);
+	}
+
+	std::string kdfMode;
+	Utils::LoadResource("KDFMODE", "INFORMATION", kdfMode);
+	if (Utils::TryParseInt(kdfMode, parsedValue))
+	{
+		wndMain.SetKdfMode(parsedValue);
+	}
+	else
+	{
+		wndMain.SetKdfMode(static_cast<int>(AESLayer::KdfMode::Scrypt));
 	}
 
 	// create window
@@ -251,57 +311,10 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 	if (((wndMain.m_text != text) || (wndMain.m_password != password) || wndMain.m_bTraitsChanged) && (wndMain.m_password.size()))
 	{
 		password = wndMain.m_password;
-
-		data = "";
-		if (!wndMain.m_text.empty())
+		if (!StageWritebackFromMainFrame(wndMain, password))
 		{
-			Utils::EncryptString(wndMain.m_text, password, data);
+			Utils::MessageBox(nullptr, L"Saving changes failed.", MB_OK | MB_ICONERROR);
 		}
-		else
-		{
-			MessageBox(NULL, WSTR(IDS_TEXT_IS_ENCRYPTED), MB_OK | MB_ICONINFORMATION);
-		}
-
-		CHAR szModulePath[MAX_PATH] = {'\0'};
-		CHAR szTempPath[MAX_PATH] = {'\0'};
-		CHAR szFileName[MAX_PATH] = {'\0'};
-
-		::GetModuleFileNameA(Utils::GetModuleHandle(), szModulePath, MAX_PATH);
-		::GetTempPathA(MAX_PATH, szTempPath);
-		::GetTempFileNameA(szTempPath, "STG", 0, szFileName);
-
-		::CopyFileA(szModulePath, szFileName, FALSE);
-		Utils::UpdateResource(szFileName, "CONTENT", "PAYLOAD", data);
-
-		// write window sizes to resource
-		std::string sizeinfo;
-		char szSizeInfo[MAX_PATH] = "";
-		sprintf_s(szSizeInfo, MAX_PATH, "%d", wndMain.m_nWindowSizeX);
-		sizeinfo = szSizeInfo;
-		Utils::UpdateResource(szFileName, "SIZEX", "INFORMATION", sizeinfo);
-		sprintf_s(szSizeInfo, MAX_PATH, "%d", wndMain.m_nWindowSizeY);
-		sizeinfo = szSizeInfo;
-		Utils::UpdateResource(szFileName, "SIZEY", "INFORMATION", sizeinfo);
-	
-		// write font size
-		std::string fontsize;
-		char szFontSize[MAX_PATH] = "";
-		sprintf_s(szFontSize, MAX_PATH, "%d", wndMain.m_nFontSize);
-		fontsize = szFontSize;
-		Utils::UpdateResource(szFileName, "FONTSIZE", "INFORMATION", fontsize);
-
-		// write font typeface
-		Utils::UpdateResource(szFileName, "TYPEFACE", "INFORMATION", wndMain.m_strFontName);
-
-		// write language code if changed
-		int langid = wndMain.GetLanguage();
-		if (langid != 0)
-		{
-			std::stringstream sslanguage;
-			sslanguage << langid;
-			Utils::UpdateResource(szFileName, "LANGID", "INFORMATION", sslanguage.str());
-		}
-		_tspawnl(_P_NOWAIT, utf8_to_wstring(szFileName).c_str(), utf8_to_wstring(Utils::Quote(szFileName)).c_str(), _T("-writeback"), utf8_to_wstring(Utils::Quote(szModulePath)).c_str(), NULL);
 	}
 
 	return nRet;

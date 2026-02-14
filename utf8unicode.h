@@ -1,113 +1,98 @@
-
-// Copyright (c) 2023 Steganos Software GmbH
-//
-// LicenseName: Proprietary License
-
 #ifndef _UTF8UNICODE
 #define _UTF8UNICODE
 
 #pragma once
 
+#include <algorithm>
 #include <string>
 
 #include <windows.h>
 
 std::string wchar_to_utf8(LPCWSTR lpString, bool bIncludeZero = false)
 {
-	int nDestBufLen=0;
-	int nDestStrLen=0;
-	LPSTR lpBuffer=NULL;
-	
-	nDestBufLen = WideCharToMultiByte(
-				CP_UTF8,		// code page
-				NULL,			// performance and mapping flags
-				lpString,		// wide-character string
-				-1,				// number of chars in string
-				NULL,			// buffer for new string
-				0,				// size of buffer (Retrieve)
-				NULL,			// default for unmappable chars
-				NULL);			// set when default char used
-	
-	if(nDestBufLen)
+	if (lpString == nullptr)
 	{
-		lpBuffer = new CHAR[nDestBufLen];
-		
-		if(lpBuffer)
-		{
-			nDestStrLen = WideCharToMultiByte(
-						CP_UTF8,		// code page
-						NULL,			// performance and mapping flags
-						lpString,		// wide-character string
-						-1,			// number of chars in string
-						lpBuffer,			// buffer for new string
-						nDestBufLen,	// size of buffer
-						NULL,			// default for unmappable chars
-						NULL);			// set when default char used
-		}
+		return {};
 	}
 
-	std::string strResult;
-	if (lpBuffer)
+	const int requiredChars = WideCharToMultiByte(
+		CP_UTF8,
+		0,
+		lpString,
+		-1,
+		nullptr,
+		0,
+		nullptr,
+		nullptr);
+	if (requiredChars <= 0)
 	{
-		strResult = lpBuffer;
-		if (bIncludeZero)
-		{
-			strResult.resize(nDestBufLen);
-		}
-		else
-		{
-			strResult.resize(nDestBufLen - 1); // -1 to not include \0
-		}
-		delete [] lpBuffer;
-		lpBuffer = NULL;
+		return {};
 	}
-	return strResult;
+
+	std::string result(static_cast<size_t>(requiredChars), '\0');
+	const int writtenChars = WideCharToMultiByte(
+		CP_UTF8,
+		0,
+		lpString,
+		-1,
+		result.data(),
+		requiredChars,
+		nullptr,
+		nullptr);
+	if (writtenChars <= 0)
+	{
+		return {};
+	}
+
+	if (!bIncludeZero && !result.empty() && result.back() == '\0')
+	{
+		result.pop_back();
+	}
+	return result;
 }
 
-std::string wstring_to_utf8(std::wstring str, bool bIncludeZero = false)
+std::string wstring_to_utf8(const std::wstring& str, bool bIncludeZero = false)
 {
 	return wchar_to_utf8(str.c_str(), bIncludeZero);
 }
 
 std::wstring utf8_to_wstring(LPCSTR lpString)
 {
-	// Free with MemoryFree();
-	int nDestBufLen=0;
-	int nDestStrLen=0;
-	LPWSTR lpBuffer=NULL;
-	
-	nDestBufLen = MultiByteToWideChar(
-				CP_UTF8,		// code page
-				NULL,			// performance and mapping flags
-				lpString,		// multibyte string
-				-1,				// number of chars in string
-				NULL,			// buffer for new string
-				0);				// size of buffer (Retrieve)
-
-	if(nDestBufLen)
+	if (lpString == nullptr)
 	{
-		lpBuffer = new WCHAR[nDestBufLen];
-		
-		if(lpBuffer)
-		{
-			nDestStrLen = MultiByteToWideChar(
-						CP_UTF8,		// code page
-						NULL,			// performance and mapping flags
-						lpString,		// multibyte string
-						-1,			// number of chars in string
-						lpBuffer,			// buffer for new string
-						nDestBufLen * sizeof(WCHAR));	// size of buffer
-		}
+		return {};
 	}
 
-	std::wstring strResult;
-	if (lpBuffer)
+	const int requiredChars = MultiByteToWideChar(
+		CP_UTF8,
+		0,
+		lpString,
+		-1,
+		nullptr,
+		0);
+	if (requiredChars <= 0)
 	{
-		strResult = lpBuffer;
-		delete [] lpBuffer;
-		lpBuffer = NULL;
+		return {};
 	}
-	return strResult;
+
+	std::wstring result(static_cast<size_t>(requiredChars), L'\0');
+	const int writtenChars = MultiByteToWideChar(
+		CP_UTF8,
+		0,
+		lpString,
+		-1,
+		result.data(),
+		requiredChars);
+	if (writtenChars <= 0)
+	{
+		return {};
+	}
+
+	if (!result.empty() && result.back() == L'\0')
+	{
+		result.pop_back();
+	}
+	return result;
 }
 
 std::wstring utf8_to_wstring(const std::string& s)
@@ -118,36 +103,14 @@ std::wstring utf8_to_wstring(const std::string& s)
 // buffer must be deleted after use
 LPWSTR utf8_to_wchar(LPCSTR lpString)
 {
-	// Free with MemoryFree();
-	int nDestBufLen=0;
-	int nDestStrLen=0;
-	LPWSTR lpBuffer=NULL;
-	
-	nDestBufLen = MultiByteToWideChar(
-				CP_UTF8,		// code page
-				NULL,			// performance and mapping flags
-				lpString,		// multibyte string
-				-1,				// number of chars in string
-				NULL,			// buffer for new string
-				0);				// size of buffer (Retrieve)
-
-	if(nDestBufLen)
+	const std::wstring wide = utf8_to_wstring(lpString);
+	LPWSTR buffer = new WCHAR[wide.size() + 1];
+	std::fill(buffer, buffer + wide.size() + 1, L'\0');
+	if (!wide.empty())
 	{
-		lpBuffer = new WCHAR[nDestBufLen];
-		
-		if (lpBuffer)
-		{
-			nDestStrLen = MultiByteToWideChar(
-						CP_UTF8,		// code page
-						NULL,			// performance and mapping flags
-						lpString,		// multibyte string
-						-1,			// number of chars in string
-						lpBuffer,			// buffer for new string
-						nDestBufLen * sizeof(WCHAR));	// size of buffer
-		}
+		std::copy(wide.begin(), wide.end(), buffer);
 	}
-
-	return lpBuffer;
+	return buffer;
 }
 
 #endif // _UTF8UNICODE
