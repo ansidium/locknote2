@@ -31,15 +31,40 @@ jobs:
       - name: Setup vcpkg
         shell: pwsh
         run: |
+          function Invoke-Retry {
+            param(
+              [Parameter(Mandatory = $true)][string]$Name,
+              [Parameter(Mandatory = $true)][scriptblock]$Action,
+              [int]$MaxAttempts = 5,
+              [int]$DelaySeconds = 15
+            )
+            for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+              Write-Host "[$Name] Attempt $attempt/$MaxAttempts"
+              & $Action
+              if ($LASTEXITCODE -eq 0) {
+                return
+              }
+              if ($attempt -eq $MaxAttempts) {
+                throw "$Name failed with exit code $LASTEXITCODE after $MaxAttempts attempts."
+              }
+              Start-Sleep -Seconds $DelaySeconds
+            }
+          }
+
           $vcpkgRoot = Join-Path $env:RUNNER_TEMP "vcpkg"
+          $env:VCPKG_ROOT = $vcpkgRoot
           if (-not (Test-Path $vcpkgRoot)) {
             git clone https://github.com/microsoft/vcpkg $vcpkgRoot
           } else {
             git -C $vcpkgRoot fetch --all --tags --prune
           }
-          & "$vcpkgRoot\\bootstrap-vcpkg.bat" -disableMetrics
+          Invoke-Retry -Name "vcpkg bootstrap" -Action {
+            & "$vcpkgRoot\\bootstrap-vcpkg.bat" -disableMetrics
+          }
           & "$vcpkgRoot\\vcpkg.exe" integrate install
-          & "$vcpkgRoot\\vcpkg.exe" install --triplet x86-windows-static --x-manifest-root="$PWD" --disable-metrics
+          Invoke-Retry -Name "vcpkg install dependencies" -Action {
+            & "$vcpkgRoot\\vcpkg.exe" install --triplet x86-windows-static --x-manifest-root="$PWD" --disable-metrics
+          }
           "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $vcpkgRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
