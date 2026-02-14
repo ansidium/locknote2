@@ -74,8 +74,8 @@ public:
 
 	LRESULT OnCloseCmd(WORD /*wNotifyCode*/, WORD wID, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 	{
-		const int password1Length = ::GetDlgItemTextLengthW(m_hWnd, IDC_PASSWORD1);
-		const int password2Length = ::GetDlgItemTextLengthW(m_hWnd, IDC_PASSWORD2);
+		const int password1Length = GetDlgItem(IDC_PASSWORD1).GetWindowTextLength();
+		const int password2Length = GetDlgItem(IDC_PASSWORD2).GetWindowTextLength();
 		std::vector<wchar_t> password1(static_cast<size_t>(password1Length) + 1, L'\0');
 		std::vector<wchar_t> password2(static_cast<size_t>(password2Length) + 1, L'\0');
 
