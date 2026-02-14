@@ -12,8 +12,9 @@
 - Normalized drag-and-drop filename handling to UTF-16 (`DragQueryFileW`) and UTF-8 conversion.
 
 ### Build and Toolchain
-- Set project language mode to `/std:c++23preview`.
+- Made C++ language mode configurable via `LockNoteCppLanguageStandard` (default `stdcpp20`, optional `stdcpp23preview`).
 - Raised warning level to `/W4` and enabled UTF-8 source handling (`/utf-8`).
+- Added workaround for MSBuild 17.14 `stdcpp23preview` metadata regression in CI.
 
 ### QA
 - Added `scripts/windows-qa.ps1` for Debug/Release builds, optional code analysis, optional cppcheck, and smoke tests.

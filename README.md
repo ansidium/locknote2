@@ -21,7 +21,7 @@ Build Notes
 LockNote 2 builds with:
 
 * Microsoft Visual Studio 2022 17.14+ (`v143`)
-* C++ language mode: `/std:c++23preview` (project default)
+* C++ language mode: C++20 by default for CI compatibility
 * vcpkg manifest mode (`vcpkg.json`)
 
 Windows setup checklist:
@@ -47,6 +47,12 @@ Build from command line:
 
 ```powershell
 msbuild .\locknote2.sln /m /t:Restore,Build /p:Configuration=Release;Platform=Win32;VcpkgEnableManifest=true
+```
+
+Optional C++23 preview mode:
+
+```powershell
+msbuild .\locknote2.sln /m /t:Build /p:Configuration=Release;Platform=Win32;LockNoteCppLanguageStandard=stdcpp23preview
 ```
 
 Dependencies:
