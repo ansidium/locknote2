@@ -29,12 +29,12 @@
 //#include <windows.h>
 #include "utils.h"
 
-constexpr char* DEFAULT_FONT_NAME = NAME_FONT_CONSOLAS;
+inline constexpr const char* DEFAULT_FONT_NAME = NAME_FONT_CONSOLAS;
 constexpr unsigned int DEFAULT_FONT_SIZE = 12;
 constexpr unsigned int DEFAULT_WIDTH = 650;
 constexpr unsigned int DEFAULT_HEIGHT = 500;
 
-UINT UWM_FINDMSGSTRING = CFindReplaceDialog::GetFindReplaceMsg();
+inline const UINT UWM_FINDMSGSTRING = CFindReplaceDialog::GetFindReplaceMsg();
 
 class CMainFrame 
 	: public CFrameWindowImpl<CMainFrame>, public CMessageFilter, public CIdleHandler
@@ -544,61 +544,52 @@ public:
 		}
 	}
 
-	LRESULT OnDropFiles(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& /*bHandled*/)
-	{
-		HDROP hDrop = (HDROP)wParam;
-		UINT uFileCount = DragQueryFile(hDrop, 0xFFFFFFFF, NULL, 0);
-		int nResult = Utils::MessageBox(*this, WSTR(IDS_ASK_CONVERT_FILES), MB_YESNO | MB_ICONQUESTION);
-		if (nResult == IDYES)
+		LRESULT OnDropFiles(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& /*bHandled*/)
 		{
-			int nConverted = 0;
-			std::string encryptPassword;
-			//std::list<std::string> decryptPasswords;
-			for (UINT uIndex = 0; uIndex < uFileCount; uIndex++)
+			HDROP hDrop = reinterpret_cast<HDROP>(wParam);
+			const UINT uFileCount = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+			const int nResult = Utils::MessageBox(*this, WSTR(IDS_ASK_CONVERT_FILES), MB_YESNO | MB_ICONQUESTION);
+			if (nResult == IDYES)
 			{
-				UINT uLength = DragQueryFile(hDrop, uIndex, NULL, 0);
-				std::vector<char> fileBuffer(static_cast<size_t>(uLength) + 1, '\0');
-				DragQueryFileA(hDrop, uIndex, fileBuffer.data(), uLength + 1);
-				const std::string filename = fileBuffer.data();
-
-				if (HasExtension(filename, ".txt"))
+				int nConverted = 0;
+				std::string encryptPassword;
+				for (UINT uIndex = 0; uIndex < uFileCount; ++uIndex)
 				{
-					std::string newfilename = filename.substr(0, filename.size() - 4);
-					newfilename += ".exe";
-					std::string text;
-					std::string password;
-					if (LoadTextFromFile(filename, text, password))
+					const UINT uLength = DragQueryFileW(hDrop, uIndex, nullptr, 0);
+					std::wstring fileBuffer(static_cast<size_t>(uLength) + 1, L'\0');
+					DragQueryFileW(hDrop, uIndex, fileBuffer.data(), uLength + 1);
+					const std::string filename = wstring_to_utf8(fileBuffer.data());
+
+					if (HasExtension(filename, ".txt"))
 					{
-						if (SaveTextToFile(newfilename, text, encryptPassword))
+						std::string newfilename = filename.substr(0, filename.size() - 4);
+						newfilename += ".exe";
+						std::string text;
+						std::string password;
+						if (LoadTextFromFile(filename, text, password) && SaveTextToFile(newfilename, text, encryptPassword))
 						{
-							nConverted += 1;
+							++nConverted;
 						}
 					}
+					else
+					{
+						std::array<char, 512> message{};
+						sprintf_s(message.data(), message.size(), STR(IDS_CANT_CONVERT).c_str(), filename.c_str());
+						Utils::MessageBox(*this, utf8_to_wstring(message.data()), MB_OK | MB_ICONERROR);
+					}
 				}
-				/*
-				// convert SLIM back to text
-				else if (extension == _T(".exe"))
+
+				if (nConverted)
 				{
-					_tcscpy(&newfilename[uLength-4], _T(".txt"));
-				}
-				*/
-				else
-				{
-					std::array<char, 512> message{};
-					sprintf_s(message.data(), message.size(), STR(IDS_CANT_CONVERT).c_str(), filename.c_str());
-					Utils::MessageBox(*this, utf8_to_wstring(message.data()), MB_OK | MB_ICONERROR);
+					std::array<char, 256> message{};
+					sprintf_s(message.data(), message.size(), STR(IDS_CONVERT_DONE).c_str(), nConverted);
+					Utils::MessageBox(*this, utf8_to_wstring(message.data()), MB_OK | MB_ICONINFORMATION);
 				}
 			}
-			if (nConverted)
-			{
-				std::array<char, 256> message{};
-				sprintf_s(message.data(), message.size(), STR(IDS_CONVERT_DONE).c_str(), nConverted);
-				Utils::MessageBox(*this, utf8_to_wstring(message.data()), MB_OK | MB_ICONINFORMATION);
-			}
+
+			DragFinish(hDrop);
+			return 0;
 		}
-		DragFinish(hDrop);
-		return 0;
-	}
 
 	LRESULT OnFileSave(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 	{
@@ -708,105 +699,108 @@ public:
 		return 0;
 	}
 
-	LRESULT OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
-	{
-		m_dwSearchFlags = FR_DOWN;
-		m_pCurrentFindReplaceDialog = nullptr;
-
-		DragAcceptFiles(TRUE);
-
-		CreateSimpleStatusBar(); //m_hWndStatusBar
-
-		m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, WS_EX_WINDOWEDGE);
-		m_view.SetLimitText(0x7ffffffe); // allow a lot of text to be entered
-
-		CClientDC dc(*this);
-		auto dpi = GetDeviceCaps(dc, LOGPIXELSY);
-		auto dpi_factor_font = MulDiv(m_nFontSize, dpi, 72);
-		if (m_nWindowSizeX == DEFAULT_WIDTH && m_nWindowSizeY == DEFAULT_HEIGHT)
+		LRESULT OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
 		{
-			// resize window depending on dpi scale factor
-			m_nWindowSizeX = MulDiv(m_nWindowSizeX, dpi, 96);
-			m_nWindowSizeY = MulDiv(m_nWindowSizeY, dpi, 96);
+			m_dwSearchFlags = FR_DOWN;
+			m_pCurrentFindReplaceDialog = nullptr;
+
+			DragAcceptFiles(TRUE);
+
+			CreateSimpleStatusBar(); //m_hWndStatusBar
+
+			m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, WS_EX_WINDOWEDGE);
+			m_view.SetLimitText(0x7ffffffe); // allow a lot of text to be entered
+
+			CClientDC dc(*this);
+			auto dpi = GetDeviceCaps(dc, LOGPIXELSY);
+			auto dpi_factor_font = MulDiv(m_nFontSize, dpi, 72);
+			if (m_nWindowSizeX == DEFAULT_WIDTH && m_nWindowSizeY == DEFAULT_HEIGHT)
+			{
+				// resize window depending on dpi scale factor
+				m_nWindowSizeX = MulDiv(m_nWindowSizeX, dpi, 96);
+				m_nWindowSizeY = MulDiv(m_nWindowSizeY, dpi, 96);
+			}
+			m_fontEdit.CreateFont(
+				-dpi_factor_font,
+				0,
+				0,
+				0,
+				FW_NORMAL,
+				FALSE,
+				FALSE,
+				FALSE,
+				DEFAULT_CHARSET,
+				OUT_DEFAULT_PRECIS,
+				CLIP_DEFAULT_PRECIS,
+				DEFAULT_QUALITY,
+				DEFAULT_PITCH,
+				utf8_to_wstring(m_strFontName).c_str());
+
+			ATLASSERT(m_fontEdit);
+			m_view.SetFont(m_fontEdit);
+
+			auto margin = MulDiv(20, dpi, 96);
+			m_view.SetMargins(margin, margin);
+
+			if (!m_text.empty())
+			{
+				SetViewTextWithoutTracking(m_text);
+			}
+
+			std::array<wchar_t, MAX_PATH> modulePath{};
+			const DWORD modulePathLength = ::GetModuleFileNameW(Utils::GetModuleHandle(), modulePath.data(), static_cast<DWORD>(modulePath.size()));
+			if (modulePathLength == 0 || modulePathLength >= modulePath.size())
+			{
+				return -1;
+			}
+
+			std::string title = wstring_to_utf8(modulePath.data());
+			const size_t nSlashPos = title.find_last_of('\\');
+			if (nSlashPos != std::string::npos)
+			{
+				title = title.substr(nSlashPos + 1);
+			}
+			const size_t nDotPos = title.find_last_of('.');
+			if (nDotPos != std::string::npos)
+			{
+				title = title.substr(0, nDotPos);
+			}
+
+			const std::string windowTitle = title + " - " + STR(IDR_MAINFRAME);
+
+			// register object for message filtering and idle updates
+			CMessageLoop* pLoop = _Module.GetMessageLoop();
+			ATLASSERT(pLoop != NULL);
+			pLoop->AddMessageFilter(this);
+			pLoop->AddIdleHandler(this);
+
+			m_currentBuffer.m_strText = GetText();
+			m_view.GetSel(m_currentBuffer.m_nStartChar, m_currentBuffer.m_nEndChar);
+			m_view.SetModify(FALSE);
+
+			UpdateControlItemTexts();
+
+			// get default UI language, set checkmark in menu
+			if (m_nLanguage == 0)
+			{
+				LANGID langid = GetUserDefaultUILanguage();
+				m_nLanguage = langid & 0b0000000111111111;
+			}
+			CheckLanguage(static_cast<WORD>(m_nLanguage));
+
+			SetWindowPos(NULL, 0, 0, m_nWindowSizeX, m_nWindowSizeY, SWP_NOZORDER | SWP_NOMOVE);
+			CenterWindow();
+
+			m_view.SetFocus();
+
+			m_view.SetSel(m_currentBuffer.m_nStartChar + 2, m_currentBuffer.m_nStartChar + 2);
+
+			SetWindowText(utf8_to_wstring(windowTitle).c_str());
+
+			UpdateStatusBar();
+
+			return 0;
 		}
-		m_fontEdit.CreateFont(
-			-dpi_factor_font,
-			0,
-			0,
-			0,
-			FW_NORMAL,
-			FALSE,
-			FALSE,
-			FALSE,
-			DEFAULT_CHARSET,
-			OUT_DEFAULT_PRECIS,
-			CLIP_DEFAULT_PRECIS,
-			DEFAULT_QUALITY,
-			DEFAULT_PITCH,
-			utf8_to_wstring(m_strFontName).c_str());
-
-		ATLASSERT(m_fontEdit);
-		m_view.SetFont(m_fontEdit);
-
-		auto margin = MulDiv(20, dpi, 96);
-		m_view.SetMargins(margin, margin);
-
-		if (!m_text.empty())
-		{
-			SetViewTextWithoutTracking(m_text);
-		}
-
-		std::array<char, MAX_PATH> modulePath{};
-		::GetModuleFileNameA(Utils::GetModuleHandle(), modulePath.data(), static_cast<DWORD>(modulePath.size()));
-
-		std::string title = modulePath.data();
-		const size_t nSlashPos = title.find_last_of('\\');
-		if (nSlashPos != std::string::npos)
-		{
-			title = title.substr(nSlashPos + 1);
-		}
-		const size_t nDotPos = title.find_last_of('.');
-		if (nDotPos != std::string::npos)
-		{
-			title = title.substr(0, nDotPos);
-		}
-
-		std::array<char, MAX_PATH + 100> windowTitle{};
-		sprintf_s(windowTitle.data(), windowTitle.size(), "%s - %s", title.c_str(), STR(IDR_MAINFRAME).c_str());
-
-		// register object for message filtering and idle updates
-		CMessageLoop* pLoop = _Module.GetMessageLoop();
-		ATLASSERT(pLoop != NULL);
-		pLoop->AddMessageFilter(this);
-		pLoop->AddIdleHandler(this);
-
-		m_currentBuffer.m_strText = GetText();
-		m_view.GetSel(m_currentBuffer.m_nStartChar, m_currentBuffer.m_nEndChar);
-		m_view.SetModify(FALSE);
-
-		UpdateControlItemTexts();
-
-		// get default UI language, set checkmark in menu
-		if (m_nLanguage == 0)
-		{
-			LANGID langid = GetUserDefaultUILanguage();
-			m_nLanguage = langid & 0b0000000111111111;
-		}
-		CheckLanguage(static_cast<WORD>(m_nLanguage));
-
-		SetWindowPos(NULL, 0, 0, m_nWindowSizeX, m_nWindowSizeY, SWP_NOZORDER|SWP_NOMOVE);
-		CenterWindow();
-
-		m_view.SetFocus();
-
-		m_view.SetSel(m_currentBuffer.m_nStartChar + 2, m_currentBuffer.m_nStartChar + 2);
-
-		SetWindowText(utf8_to_wstring(windowTitle.data()).c_str());
-
-		UpdateStatusBar();
-
-		return 0;
-	}
 
 	void UpdateControlItemTexts()
 	{
@@ -1129,21 +1123,21 @@ public:
 		return 0;
 	}
 
-	LRESULT OnFileChangePassword(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
-	{
-		if (!m_password.empty())
+		LRESULT OnFileChangePassword(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 		{
-			std::string strOldPassword = GetPasswordDlg(*this);
-			if (strOldPassword.empty())
+			if (!m_password.empty())
 			{
-				return 0;
+				std::string strOldPassword = GetPasswordDlg(*this);
+				if (strOldPassword.empty())
+				{
+					return 0;
+				}
+				if (!Utils::ConstantTimeEquals(strOldPassword, m_password))
+				{
+					Utils::MessageBox(*this, WSTR(IDS_INVALID_PASSWORD), MB_OK | MB_ICONERROR);
+					return 0;
+				}
 			}
-			if (strOldPassword != m_password)
-			{
-				Utils::MessageBox(*this, WSTR(IDS_INVALID_PASSWORD), MB_OK | MB_ICONERROR);
-				return 0;
-			}
-		}
 
 		std::string strNewPassword = GetNewPasswordDlg(*this);
 		if (strNewPassword.empty())

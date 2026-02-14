@@ -22,6 +22,7 @@
 #include <atldlgs.h>
 
 #include <process.h>
+#include <algorithm>
 #include <array>
 
 #include <atlfile.h>
@@ -39,6 +40,53 @@ CAppModule _Module;
 
 namespace
 {
+	constexpr int kFileRetryCount = 300;
+	constexpr DWORD kFileRetrySleepMs = 100;
+
+	template <typename TPath>
+	bool RetryCopyFile(const TPath& source, const TPath& target)
+	{
+		for (int attempt = 0; attempt < kFileRetryCount; ++attempt)
+		{
+			if (::CopyFile(source, target, FALSE))
+			{
+				return true;
+			}
+
+			const DWORD lastError = ::GetLastError();
+			if (lastError != ERROR_SHARING_VIOLATION && lastError != ERROR_ACCESS_DENIED)
+			{
+				return false;
+			}
+			::Sleep(kFileRetrySleepMs);
+		}
+		return false;
+	}
+
+	template <typename TPath>
+	bool RetryDeleteFile(const TPath& target)
+	{
+		for (int attempt = 0; attempt < kFileRetryCount; ++attempt)
+		{
+			if (!::PathFileExists(target))
+			{
+				return true;
+			}
+			if (::DeleteFile(target))
+			{
+				return true;
+			}
+
+			const DWORD lastError = ::GetLastError();
+			if (lastError != ERROR_SHARING_VIOLATION && lastError != ERROR_ACCESS_DENIED)
+			{
+				return false;
+			}
+			::Sleep(kFileRetrySleepMs);
+		}
+		return !::PathFileExists(target);
+	}
+
 	bool StageWritebackFromMainFrame(const CMainFrame& wndMain, std::string password)
 	{
 		std::string encryptedData;
@@ -55,19 +103,41 @@ namespace
 			Utils::MessageBox(nullptr, WSTR(IDS_TEXT_IS_ENCRYPTED), MB_OK | MB_ICONINFORMATION);
 		}
 
-		std::array<char, MAX_PATH> modulePath{};
-		std::array<char, MAX_PATH> tempPath{};
-		std::array<char, MAX_PATH> fileName{};
+		std::array<wchar_t, MAX_PATH> modulePath{};
+		std::array<wchar_t, MAX_PATH> tempPath{};
+		std::array<wchar_t, MAX_PATH> fileName{};
 
-		::GetModuleFileNameA(Utils::GetModuleHandle(), modulePath.data(), static_cast<DWORD>(modulePath.size()));
-		::GetTempPathA(static_cast<DWORD>(tempPath.size()), tempPath.data());
-		::GetTempFileNameA(tempPath.data(), "STG", 0, fileName.data());
-		if (!::CopyFileA(modulePath.data(), fileName.data(), FALSE))
+		const DWORD modulePathLength = ::GetModuleFileNameW(Utils::GetModuleHandle(), modulePath.data(), static_cast<DWORD>(modulePath.size()));
+		if (modulePathLength == 0 || modulePathLength >= modulePath.size())
 		{
 			return false;
 		}
 
-		bool writeResult = Utils::UpdateResource(fileName.data(), "CONTENT", "PAYLOAD", encryptedData);
+		const DWORD tempPathLength = ::GetTempPathW(static_cast<DWORD>(tempPath.size()), tempPath.data());
+		if (tempPathLength == 0 || tempPathLength >= tempPath.size())
+		{
+			return false;
+		}
+
+		if (::GetTempFileNameW(tempPath.data(), L"STG", 0, fileName.data()) == 0)
+		{
+			return false;
+		}
+
+		if (!::CopyFileW(modulePath.data(), fileName.data(), FALSE))
+		{
+			::DeleteFileW(fileName.data());
+			return false;
+		}
+
+		const std::string fileNameUtf8 = wstring_to_utf8(fileName.data());
+		if (fileNameUtf8.empty())
+		{
+			::DeleteFileW(fileName.data());
+			return false;
+		}
+
+		bool writeResult = Utils::UpdateResource(fileNameUtf8, "CONTENT", "PAYLOAD", encryptedData);
 
 		LOCKNOTEWINTRAITS traits{};
 		traits.m_nWindowSizeX = wndMain.m_nWindowSizeX;
@@ -76,20 +146,27 @@ namespace
 		traits.m_nLangId = wndMain.GetLanguage();
 		traits.m_nKdfMode = wndMain.GetKdfMode();
 		traits.m_strFontName = wndMain.m_strFontName;
-		writeResult &= Utils::WriteWinTraitsResources(fileName.data(), traits);
+		writeResult &= Utils::WriteWinTraitsResources(fileNameUtf8, traits);
 
 		if (!writeResult)
 		{
+			::DeleteFileW(fileName.data());
 			return false;
 		}
 
-		_tspawnl(
+		const intptr_t spawnResult = _tspawnl(
 			_P_NOWAIT,
-			utf8_to_wstring(fileName.data()).c_str(),
-			utf8_to_wstring(Utils::Quote(fileName.data())).c_str(),
+			fileName.data(),
+			fileName.data(),
 			_T("-writeback"),
-			utf8_to_wstring(Utils::Quote(modulePath.data())).c_str(),
+			modulePath.data(),
 			nullptr);
+		if (spawnResult == -1)
+		{
+			::DeleteFileW(fileName.data());
+			return false;
+		}
+
 		return true;
 	}
 }
@@ -97,7 +174,11 @@ namespace
 int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 {
 	TCHAR szModulePath[MAX_PATH] = {'\0'};
-	::GetModuleFileName(Utils::GetModuleHandle(), szModulePath, MAX_PATH);
+	const DWORD modulePathLength = ::GetModuleFileName(Utils::GetModuleHandle(), szModulePath, MAX_PATH);
+	if (modulePathLength == 0 || modulePathLength >= MAX_PATH)
+	{
+		return -1;
+	}
 
 	CMessageLoop theLoop;
 	_Module.AddMessageLoop(&theLoop);
@@ -113,22 +194,24 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 #endif
 		if (!_tcscmp(lpszCommand, _T("-writeback")))
 		{
-			while (!::CopyFile(szModulePath, lpszPath, FALSE))
+			if (!RetryCopyFile(szModulePath, lpszPath))
 			{
-				// wait and retry, maybe the process is still in use
-				Sleep(100);
+				return -1;
 			}
 
-			_tspawnl(_P_NOWAIT, lpszPath, utf8_to_wstring(Utils::Quote(wstring_to_utf8(lpszPath))).c_str(), _T("-erase"), utf8_to_wstring(Utils::Quote(wstring_to_utf8(szModulePath))).c_str(), NULL);
+			const intptr_t spawnResult = _tspawnl(_P_NOWAIT, lpszPath, lpszPath, _T("-erase"), szModulePath, nullptr);
+			if (spawnResult == -1)
+			{
+				return -1;
+			}
 
 			return 0;
 		}
 		else if (!_tcscmp(lpszCommand, _T("-erase")))
 		{
-			while (PathFileExists(lpszPath) && !::DeleteFile(lpszPath))
+			if (!RetryDeleteFile(lpszPath))
 			{
-				// wait and retry, maybe the process is still in use
-				Sleep(100);
+				return -1;
 			}
 
 			return 0;
@@ -144,7 +227,11 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 			std::string encryptPassword;
 			for (int nIndex = 1; nIndex < __argc; nIndex++)
 			{
+#ifdef _UNICODE
+				const std::string filename = wstring_to_utf8(__wargv[nIndex]);
+#else
 				const std::string filename = __argv[nIndex];
+#endif
 				if (HasExtension(filename, ".txt"))
 				{
 					std::string newfilename = filename.substr(0, filename.size() - 4);
@@ -179,17 +266,15 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 		return 0;
 	}
 
-	CHAR szFileMappingName[MAX_PATH];
-	strcpy_s(szFileMappingName, MAX_PATH, wstring_to_utf8(szModulePath).c_str());
-	CHAR* szChar = szFileMappingName;
-	while (*szChar)
-	{
-		if ((*szChar == '\\')||(*szChar == ':'))
+	std::string szFileMappingName = wstring_to_utf8(szModulePath);
+	std::replace_if(
+		szFileMappingName.begin(),
+		szFileMappingName.end(),
+		[](const char ch)
 		{
-			*szChar = '_';
-		}
-		szChar++;
-	};
+			return ch == '\\' || ch == ':';
+		},
+		'_');
 
 	CAtlFileMapping<HWND> fmSingleInstanceHWND;
 	BOOL bAlreadyExisted = FALSE;

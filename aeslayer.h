@@ -62,7 +62,7 @@ public:
 	// encrypt-then-mac using HMAC-SHA256
 	// MAC is generated over the authenticated payload format
 	// before: use MaxCiphertextLen() to allocate an output buffer of appropriate size
-	static unsigned int Encrypt(RandomNumberGenerator& rng, ConstByteArrayParameter const& passphrase, byte* output, const std::string& plaintext, const EncryptionOptions& options = {});
+		static unsigned int Encrypt(RandomNumberGenerator& rng, ConstByteArrayParameter const& passphrase, byte* output, const std::string& plaintext, const EncryptionOptions& options);
 
 	// decryption:
 	// parse payload format, derive keys using selected or fallback KDF

@@ -25,8 +25,10 @@
 #include <charconv>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -112,12 +114,24 @@ namespace Utils
 		return ec == std::errc{} && parsedUntil == end;
 	}
 
-	inline AESLayer::KdfMode ParseKdfModeValue(const int value)
-	{
-		return value == static_cast<int>(AESLayer::KdfMode::Pbkdf2Sha256)
-			? AESLayer::KdfMode::Pbkdf2Sha256
-			: AESLayer::KdfMode::Scrypt;
-	}
+		inline AESLayer::KdfMode ParseKdfModeValue(const int value)
+		{
+			return value == static_cast<int>(AESLayer::KdfMode::Pbkdf2Sha256)
+				? AESLayer::KdfMode::Pbkdf2Sha256
+				: AESLayer::KdfMode::Scrypt;
+		}
+
+		inline bool ConstantTimeEquals(const std::string_view lhs, const std::string_view rhs)
+		{
+			if (lhs.size() != rhs.size())
+			{
+				return false;
+			}
+			return VerifyBufsEqual(
+				reinterpret_cast<const byte*>(lhs.data()),
+				reinterpret_cast<const byte*>(rhs.data()),
+				lhs.size());
+		}
 
 	inline bool UpdateResource(
 		const std::string& strExePath,
@@ -125,20 +139,33 @@ namespace Utils
 		const std::string& strResourceSection,
 		const std::vector<unsigned char>& arrayBuffer)
 	{
+		if (arrayBuffer.size() > static_cast<size_t>(std::numeric_limits<DWORD>::max()))
+		{
+			return false;
+		}
+
+		const std::wstring exePath = utf8_to_wstring(strExePath);
+		const std::wstring resourceName = utf8_to_wstring(strResourceName);
+		const std::wstring resourceSection = utf8_to_wstring(strResourceSection);
+		if (exePath.empty() || resourceName.empty() || resourceSection.empty())
+		{
+			return false;
+		}
+
 		bool bResult = false;
-		HANDLE hFile = ::BeginUpdateResourceA(strExePath.c_str(), false);
+		HANDLE hFile = ::BeginUpdateResourceW(exePath.c_str(), FALSE);
 		if (hFile)
 		{
 			void* resourceData = arrayBuffer.empty() ? nullptr : const_cast<unsigned char*>(arrayBuffer.data());
-			bResult = ::UpdateResourceA(
+			bResult = ::UpdateResourceW(
 				hFile,
-				strResourceSection.c_str(),
-				strResourceName.c_str(),
-				LANG_NEUTRAL,
+				resourceSection.c_str(),
+				resourceName.c_str(),
+				MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
 				resourceData,
 				static_cast<DWORD>(arrayBuffer.size())) ? true : false;
 
-			if (!::EndUpdateResource(hFile, false))
+			if (!::EndUpdateResourceW(hFile, bResult ? FALSE : TRUE))
 			{
 				bResult = false;
 			}
@@ -277,31 +304,38 @@ namespace Utils
 			return false;
 		}
 
+		const std::wstring widePath = utf8_to_wstring(path);
+		if (widePath.empty())
+		{
+			return false;
+		}
+
 		FILE* f = nullptr;
-		const errno_t err = fopen_s(&f, path.c_str(), "rb");
+		const errno_t err = _wfopen_s(&f, widePath.c_str(), L"rb");
 		if (err != 0 || f == nullptr)
 		{
 			return false;
 		}
 
-		if (fseek(f, 0, SEEK_END) != 0)
+		if (_fseeki64(f, 0, SEEK_END) != 0)
 		{
 			fclose(f);
 			return false;
 		}
 
-		const long fileSize = ftell(f);
-		if (fileSize < 0 || fseek(f, 0, SEEK_SET) != 0)
+		const __int64 fileSize = _ftelli64(f);
+		if (fileSize < 0 || fileSize > static_cast<__int64>(std::numeric_limits<size_t>::max()) || _fseeki64(f, 0, SEEK_SET) != 0)
 		{
 			fclose(f);
 			return false;
 		}
 
-		text.resize(static_cast<size_t>(fileSize), '\0');
+		const size_t fileSizeAsSizeT = static_cast<size_t>(fileSize);
+		text.resize(fileSizeAsSizeT, '\0');
 		if (fileSize > 0)
 		{
-			const size_t readCount = fread(text.data(), sizeof(char), static_cast<size_t>(fileSize), f);
-			if (readCount != static_cast<size_t>(fileSize))
+			const size_t readCount = fread(text.data(), sizeof(char), fileSizeAsSizeT, f);
+			if (readCount != fileSizeAsSizeT)
 			{
 				fclose(f);
 				return false;
@@ -316,8 +350,14 @@ namespace Utils
 	{
 		if (HasExtension(path, ".txt"))
 		{
+			const std::wstring widePath = utf8_to_wstring(path);
+			if (widePath.empty())
+			{
+				return false;
+			}
+
 			FILE* f = nullptr;
-			const errno_t err = fopen_s(&f, path.c_str(), "wb");
+			const errno_t err = _wfopen_s(&f, widePath.c_str(), L"wb");
 			if (err != 0 || f == nullptr)
 			{
 				return false;
@@ -352,9 +392,15 @@ namespace Utils
 			Utils::MessageBox(hWnd, WSTR(IDS_TEXT_IS_ENCRYPTED), MB_OK | MB_ICONINFORMATION);
 		}
 
-		std::array<char, MAX_PATH> modulePath{};
-		::GetModuleFileNameA(Utils::GetModuleHandle(), modulePath.data(), static_cast<DWORD>(modulePath.size()));
-		if (!::CopyFileA(modulePath.data(), path.c_str(), FALSE))
+		std::array<wchar_t, MAX_PATH> modulePath{};
+		const DWORD modulePathLength = ::GetModuleFileNameW(Utils::GetModuleHandle(), modulePath.data(), static_cast<DWORD>(modulePath.size()));
+		if (modulePathLength == 0 || modulePathLength >= modulePath.size())
+		{
+			return false;
+		}
+
+		const std::wstring targetPath = utf8_to_wstring(path);
+		if (targetPath.empty() || !::CopyFileW(modulePath.data(), targetPath.c_str(), FALSE))
 		{
 			return false;
 		}
