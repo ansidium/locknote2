@@ -36,6 +36,28 @@ try {
 
     $includePath = Join-Path $resolvedRoot "include"
     $libPath = Join-Path $resolvedRoot "lib"
+    $debugLibPath = Join-Path $resolvedRoot "debug\\lib"
+    $librarySearchPaths = @($libPath)
+    if ((Test-Path $debugLibPath) -and ($debugLibPath -ne $libPath)) {
+        $librarySearchPaths += $debugLibPath
+    }
+
+    $cryptoLibName = $null
+    foreach ($searchPath in $librarySearchPaths) {
+        foreach ($candidate in @("cryptopp.lib", "cryptoppd.lib", "cryptlib.lib")) {
+            if (Test-Path (Join-Path $searchPath $candidate)) {
+                $cryptoLibName = $candidate
+                break
+            }
+        }
+        if ($cryptoLibName) {
+            break
+        }
+    }
+    if (-not $cryptoLibName) {
+        $searchedPaths = $librarySearchPaths -join "`n  - "
+        throw "Could not find Crypto++ library file in:`n  - $searchedPaths"
+    }
 
     $outExe = Join-Path $repoRoot "tests\\aeslayer_smoke.exe"
     if (Test-Path $outExe) {
@@ -53,9 +75,12 @@ try {
         "aeslayer.cpp",
         "/link",
         "/LIBPATH:$libPath",
-        "cryptlib.lib",
+        $cryptoLibName,
         "/OUT:$outExe"
     )
+    if ((Test-Path $debugLibPath) -and ($debugLibPath -ne $libPath)) {
+        $compileArgs += "/LIBPATH:$debugLibPath"
+    }
 
     & cl.exe @compileArgs
     if ($LASTEXITCODE -ne 0) {
