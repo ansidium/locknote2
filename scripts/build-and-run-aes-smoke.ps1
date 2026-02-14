@@ -12,18 +12,30 @@ try {
         throw "cl.exe was not found. Run this from a Visual Studio Developer PowerShell prompt."
     }
 
-    if (-not $env:VCPKG_ROOT) {
-        throw "VCPKG_ROOT is not set. Install dependencies with vcpkg and set VCPKG_ROOT before running this script."
+    $candidateRoots = @(
+        Join-Path $repoRoot "vcpkg_installed\\$Triplet",
+        Join-Path $repoRoot "vcpkg_installed\\$Triplet\\$Triplet"
+    )
+    if ($env:VCPKG_ROOT) {
+        $candidateRoots += Join-Path $env:VCPKG_ROOT "installed\\$Triplet"
     }
 
-    $includePath = Join-Path $env:VCPKG_ROOT "installed\\$Triplet\\include"
-    $libPath = Join-Path $env:VCPKG_ROOT "installed\\$Triplet\\lib"
-    if (-not (Test-Path $includePath)) {
-        throw "Missing include path: $includePath"
+    $resolvedRoot = $null
+    foreach ($root in $candidateRoots) {
+        $includeCandidate = Join-Path $root "include"
+        $libCandidate = Join-Path $root "lib"
+        if ((Test-Path $includeCandidate) -and (Test-Path $libCandidate)) {
+            $resolvedRoot = $root
+            break
+        }
     }
-    if (-not (Test-Path $libPath)) {
-        throw "Missing library path: $libPath"
+    if (-not $resolvedRoot) {
+        $searched = $candidateRoots -join "`n  - "
+        throw "Could not locate vcpkg include/lib directories for triplet '$Triplet'. Searched:`n  - $searched"
     }
+
+    $includePath = Join-Path $resolvedRoot "include"
+    $libPath = Join-Path $resolvedRoot "lib"
 
     $outExe = Join-Path $repoRoot "tests\\aeslayer_smoke.exe"
     if (Test-Path $outExe) {
