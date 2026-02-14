@@ -43,8 +43,7 @@ namespace
 	constexpr int kFileRetryCount = 300;
 	constexpr DWORD kFileRetrySleepMs = 100;
 
-	template <typename TPath>
-	bool RetryCopyFile(const TPath& source, const TPath& target)
+	bool RetryCopyFile(const TCHAR* source, const TCHAR* target)
 	{
 		for (int attempt = 0; attempt < kFileRetryCount; ++attempt)
 		{
@@ -63,8 +62,7 @@ namespace
 		return false;
 	}
 
-	template <typename TPath>
-	bool RetryDeleteFile(const TPath& target)
+	bool RetryDeleteFile(const TCHAR* target)
 	{
 		for (int attempt = 0; attempt < kFileRetryCount; ++attempt)
 		{

@@ -29,6 +29,10 @@
 #endif
 #define _RICHEDIT_VER 0x0500
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <atlbase.h>
 #include <atlapp.h>
 

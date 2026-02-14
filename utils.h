@@ -139,7 +139,7 @@ namespace Utils
 		const std::string& strResourceSection,
 		const std::vector<unsigned char>& arrayBuffer)
 	{
-		if (arrayBuffer.size() > static_cast<size_t>(std::numeric_limits<DWORD>::max()))
+		if (arrayBuffer.size() > static_cast<size_t>((std::numeric_limits<DWORD>::max)()))
 		{
 			return false;
 		}
@@ -261,7 +261,7 @@ namespace Utils
 			hex.Put(reinterpret_cast<const byte*>(strEncryptedData.data()), strEncryptedData.size());
 			hex.MessageEnd();
 
-			ConstByteArrayParameter cbar(cipher.data(), cipherTextLength);
+			ConstByteArrayParameter cbar(static_cast<const byte*>(cipher.data()), cipherTextLength);
 			std::vector<byte> plainText(cipherTextLength, 0);
 			const DecodingResult result = aes.Decrypt(strPassword, plainText.data(), cbar);
 			if (!result.isValidCoding)
@@ -324,7 +324,7 @@ namespace Utils
 		}
 
 		const __int64 fileSize = _ftelli64(f);
-		if (fileSize < 0 || fileSize > static_cast<__int64>(std::numeric_limits<size_t>::max()) || _fseeki64(f, 0, SEEK_SET) != 0)
+		if (fileSize < 0 || fileSize > static_cast<__int64>((std::numeric_limits<size_t>::max)()) || _fseeki64(f, 0, SEEK_SET) != 0)
 		{
 			fclose(f);
 			return false;
