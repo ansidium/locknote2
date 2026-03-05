@@ -44,6 +44,10 @@ enum class ThemeMode : int
 	Dark = 2
 };
 
+inline constexpr UINT ID_TOOLBAR_SETTINGS = WM_APP + 101;
+
+class CSettingsWindow;
+
 class CMainFrame 
 	: public CFrameWindowImpl<CMainFrame>, public CMessageFilter, public CIdleHandler
 {
@@ -62,6 +66,7 @@ public:
 	CLockNoteView m_view;
 	CFont m_fontEdit;
 	CFont m_fontUi;
+	CFont m_fontToolbarIcons;
 	std::string m_text;
 	UndoBuffer m_currentBuffer;
 	std::string m_password;
@@ -82,7 +87,10 @@ public:
 	bool m_bTraitsChanged{ false };
 	bool m_ignoreEditNotifications{ false };
 	bool m_isDarkThemeApplied{ false };
-	static constexpr int kStatusBarParts = 5;
+	bool m_isStatusBarVisible{ true };
+	bool m_isWordWrapEnabled{ true };
+	bool m_isFormattingEnabled{ false };
+	static constexpr int kStatusBarParts = 6;
 	COLORREF m_viewTextColor{ ::GetSysColor(COLOR_WINDOWTEXT) };
 	COLORREF m_viewBackgroundColor{ ::GetSysColor(COLOR_WINDOW) };
 	COLORREF m_frameBackgroundColor{ ::GetSysColor(COLOR_3DFACE) };
@@ -118,6 +126,7 @@ public:
 	int m_toolbarPressedIndex{ -1 };
 	std::wstring m_statusBarText;
 	std::array<std::wstring, kStatusBarParts> m_statusBarPartTexts;
+	CSettingsWindow* m_settingsWindow{ nullptr };
 
 	CMainFrame()
 	{
@@ -177,6 +186,7 @@ public:
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
 		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
 		MESSAGE_HANDLER(WM_DROPFILES, OnDropFiles)
 		MESSAGE_HANDLER(UWM_FINDMSGSTRING, OnFindMsgString)
@@ -284,6 +294,199 @@ public:
 	void SetThemeMode(const int rawMode)
 	{
 		m_nThemeMode = static_cast<int>(ParseThemeMode(rawMode));
+	}
+
+	bool IsRussianUi() const
+	{
+		return static_cast<WORD>(m_nLanguage) == LANG_RUSSIAN;
+	}
+
+	bool IsStatusBarVisible() const
+	{
+		return m_isStatusBarVisible;
+	}
+
+	void SetStatusBarVisible(const bool visible)
+	{
+		if (m_isStatusBarVisible == visible)
+		{
+			return;
+		}
+		m_isStatusBarVisible = visible;
+		m_bTraitsChanged = true;
+		LayoutMainControls();
+		UpdateStatusBar();
+		if (m_hWndStatusBar)
+		{
+			::InvalidateRect(m_hWndStatusBar, nullptr, FALSE);
+		}
+		Invalidate(FALSE);
+		RefreshSettingsWindow();
+	}
+
+	bool IsWordWrapEnabled() const
+	{
+		return m_isWordWrapEnabled;
+	}
+
+	void SetWordWrapEnabled(const bool enabled)
+	{
+		if (!m_view.m_hWnd)
+		{
+			m_isWordWrapEnabled = enabled;
+			return;
+		}
+
+		const LONG_PTR oldStyle = ::GetWindowLongPtrW(m_view, GWL_STYLE);
+		LONG_PTR newStyle = oldStyle;
+		newStyle |= (WS_VSCROLL | ES_AUTOVSCROLL);
+		if (enabled)
+		{
+			newStyle &= ~WS_HSCROLL;
+			newStyle &= ~ES_AUTOHSCROLL;
+		}
+		else
+		{
+			newStyle |= WS_HSCROLL;
+			newStyle |= ES_AUTOHSCROLL;
+		}
+
+		if (newStyle != oldStyle)
+		{
+			::SetWindowLongPtrW(m_view, GWL_STYLE, newStyle);
+			::SetWindowPos(
+				m_view,
+				nullptr,
+				0,
+				0,
+				0,
+				0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+			m_bTraitsChanged = true;
+		}
+		m_isWordWrapEnabled = enabled;
+		UpdateStatusBar();
+		m_view.Invalidate();
+		RefreshSettingsWindow();
+	}
+
+	bool IsFormattingEnabled() const
+	{
+		return m_isFormattingEnabled;
+	}
+
+	void SetFormattingEnabled(const bool enabled)
+	{
+		m_isFormattingEnabled = enabled;
+		RefreshSettingsWindow();
+	}
+
+	void ApplyThemeSetting(const ThemeMode mode)
+	{
+		const UINT commandId = mode == ThemeMode::Dark
+			? ID_THEME_DARK
+			: (mode == ThemeMode::Light ? ID_THEME_LIGHT : ID_THEME_SYSTEM);
+		BOOL bHandled = FALSE;
+		OnChangeTheme(0, static_cast<WORD>(commandId), nullptr, bHandled);
+	}
+
+	void ApplyFontFaceByName(const std::string& fontName)
+	{
+		UINT commandId = ID_FONT_CONSOLAS;
+		if (fontName == NAME_FONT_ARIAL)
+		{
+			commandId = ID_FONT_ARIAL;
+		}
+		else if (fontName == NAME_FONT_COURIER_NEW)
+		{
+			commandId = ID_FONT_COURIER_NEW;
+		}
+		else if (fontName == NAME_FONT_LUCIDA_CONSOLE)
+		{
+			commandId = ID_FONT_LUCIDA_CONSOLE;
+		}
+		else if (fontName == NAME_FONT_TAHOMA)
+		{
+			commandId = ID_FONT_TAHOMA;
+		}
+		else if (fontName == NAME_FONT_VERDANA)
+		{
+			commandId = ID_FONT_VERDANA;
+		}
+		else if (fontName == NAME_FONT_CASCADIA_CODE)
+		{
+			commandId = ID_FONT_CASCADIA_CODE;
+		}
+
+		BOOL bHandled = FALSE;
+		OnViewFontTypeFace(0, static_cast<WORD>(commandId), nullptr, bHandled);
+	}
+
+	void ApplyFontSizeValue(const int fontSize)
+	{
+		UINT commandId = ID_VIEW_FONTSIZE_10;
+		switch (fontSize)
+		{
+		case 9:
+			commandId = ID_VIEW_FONTSIZE_9;
+			break;
+		case 12:
+			commandId = ID_VIEW_FONTSIZE_12;
+			break;
+		case 14:
+			commandId = ID_VIEW_FONTSIZE_14;
+			break;
+		case 10:
+		default:
+			commandId = ID_VIEW_FONTSIZE_10;
+			break;
+		}
+
+		BOOL bHandled = FALSE;
+		OnViewFontSize(0, static_cast<WORD>(commandId), nullptr, bHandled);
+	}
+
+	void ApplyLanguageById(const WORD langId)
+	{
+		BOOL bHandled = FALSE;
+		OnChangeLanguage(0, langId, nullptr, bHandled);
+	}
+
+	std::wstring GetLanguageDisplayName() const
+	{
+		switch (static_cast<WORD>(m_nLanguage))
+		{
+		case LANG_RUSSIAN:
+			return L"Русский";
+		case LANG_GERMAN:
+			return L"Deutsch";
+		case LANG_FRENCH:
+			return L"Français";
+		case LANG_SPANISH:
+			return L"Español";
+		case LANG_ITALIAN:
+			return L"Italiano";
+		case LANG_PORTUGUESE:
+			return L"Português";
+		case LANG_DUTCH:
+			return L"Nederlands";
+		case LANG_SWEDISH:
+			return L"Svenska";
+		case LANG_POLISH:
+			return L"Polski";
+		case LANG_ENGLISH:
+		default:
+			return L"English";
+		}
+	}
+
+	void OpenSettingsWindow();
+	void CloseSettingsWindow();
+	void RefreshSettingsWindow();
+
+	void OnSettingsWindowClosed()
+	{
+		m_settingsWindow = nullptr;
 	}
 
 	bool IsHighContrastEnabled() const
@@ -513,6 +716,7 @@ public:
 			::InvalidateRect(m_hWndStatusBar, nullptr, FALSE);
 		}
 		InvalidateTopBar();
+		RefreshSettingsWindow();
 	}
 
 	HMENU GetMainMenuHandle() const
@@ -543,6 +747,15 @@ public:
 			return m_fontUi;
 		}
 		return static_cast<HFONT>(::GetStockObject(DEFAULT_GUI_FONT));
+	}
+
+	HFONT GetToolbarIconFontHandle() const
+	{
+		if (m_fontToolbarIcons.m_hFont != nullptr)
+		{
+			return m_fontToolbarIcons;
+		}
+		return GetUiFontHandle();
 	}
 
 	std::wstring GetTopBarTitleText() const
@@ -605,7 +818,31 @@ public:
 		const int bottomInset = MulDiv(6, dpiX, 96);
 
 		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(dc, GetUiFontHandle()));
-		int x = leftPadding;
+		const int titlePadding = MulDiv(10, dpiX, 96);
+		const int titleIconSize = MulDiv(16, dpiX, 96);
+		const int titleTextSpacing = MulDiv(8, dpiX, 96);
+		const int titleMinWidth = MulDiv(180, dpiX, 96);
+		const int titleMaxTextWidth = MulDiv(260, dpiX, 96);
+
+		m_topBarTitleText = GetTopBarTitleText();
+		SIZE titleTextSize{};
+		::GetTextExtentPoint32W(
+			dc,
+			m_topBarTitleText.c_str(),
+			static_cast<int>(m_topBarTitleText.size()),
+			&titleTextSize);
+		const int titleWidth = (std::max)(
+			titleMinWidth,
+			(titlePadding * 2) + titleIconSize + titleTextSpacing + (std::min)(static_cast<int>(titleTextSize.cx), titleMaxTextWidth));
+		const int titleRight = (std::min)(static_cast<int>(rcClient.right) - leftPadding, leftPadding + titleWidth);
+		m_topBarTitleRect = {
+			leftPadding,
+			topInset,
+			titleRight,
+			m_nTopBarHeight - bottomInset
+		};
+
+		int x = m_topBarTitleRect.right + sectionSpacing;
 		int maxRight = static_cast<int>(rcClient.right) - leftPadding;
 		if (!m_toolbarButtonRects.empty())
 		{
@@ -613,7 +850,9 @@ public:
 		}
 		if (maxRight < x + MulDiv(110, dpiX, 96))
 		{
-			maxRight = static_cast<int>(rcClient.right) - leftPadding;
+			maxRight = (std::min)(
+				static_cast<int>(rcClient.right) - leftPadding,
+				x + MulDiv(110, dpiX, 96));
 		}
 
 		struct TopMenuEntry
@@ -634,7 +873,7 @@ public:
 		tryAddPrimaryItem(0, WSTR(IDS_MENU_FILE));
 		tryAddPrimaryItem(1, WSTR(IDS_MENU_EDIT));
 		tryAddPrimaryItem(2, WSTR(IDS_MENU_VIEW));
-		tryAddPrimaryItem(3, WSTR(IDS_MENU_HELP));
+		tryAddPrimaryItem(3, L"?");
 
 		const int itemCount = ::GetMenuItemCount(hMenu);
 		for (int pos = 0; pos < itemCount; ++pos)
@@ -730,14 +969,14 @@ public:
 
 		CClientDC dc(*this);
 		const int dpiX = GetDeviceCaps(dc, LOGPIXELSX);
-		const int minLeftPadding = MulDiv(420, dpiX, 96);
+		const int minLeftPadding = MulDiv(300, dpiX, 96);
 		const int rightPadding = MulDiv(12, dpiX, 96);
 		const int itemPaddingX = MulDiv(10, dpiX, 96);
 		const int itemSpacing = MulDiv(6, dpiX, 96);
 		const int topInset = MulDiv(6, dpiX, 96);
 		const int bottomInset = m_nTopBarHeight - MulDiv(6, dpiX, 96);
 
-		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(dc, GetUiFontHandle()));
+		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(dc, GetToolbarIconFontHandle()));
 		int x = rcClient.right - rightPadding;
 
 		struct ToolbarEntry
@@ -746,8 +985,8 @@ public:
 			std::wstring caption;
 		};
 		const std::vector<ToolbarEntry> entries{
-			{ ID_EDIT_FIND, BuildToolbarCaption(WSTR(IDS_MENUITEM_FIND)) },
-			{ ID_EDIT_FINDNEXT, BuildToolbarCaption(WSTR(IDS_MENUITEM_FINDNEXT)) }
+			{ ID_EDIT_FIND, L"\xE721" },
+			{ ID_TOOLBAR_SETTINGS, L"\xE713" }
 		};
 
 		std::vector<UINT> commandIds;
@@ -806,31 +1045,37 @@ public:
 		int statusHeight = 0;
 		if (m_hWndStatusBar)
 		{
-			::SendMessage(m_hWndStatusBar, WM_SIZE, 0, 0);
-			RECT rcStatusClient{};
-			::GetClientRect(m_hWndStatusBar, &rcStatusClient);
-			if (rcStatusClient.right > 0)
+			::ShowWindow(m_hWndStatusBar, m_isStatusBarVisible ? SW_SHOWNOACTIVATE : SW_HIDE);
+			if (m_isStatusBarVisible)
 			{
-				const int partChars = MulDiv(170, dpiX, 96);
-				const int partZoom = MulDiv(90, dpiX, 96);
-				const int partEol = MulDiv(180, dpiX, 96);
-				const int partEncoding = MulDiv(110, dpiX, 96);
-				const int minFlexible = MulDiv(170, dpiX, 96);
-				const int fixedWidth = partChars + partZoom + partEol + partEncoding;
-				const int firstRight = (std::max)(minFlexible, static_cast<int>(rcStatusClient.right) - fixedWidth);
-				int rightEdges[kStatusBarParts]{
-					firstRight,
-					firstRight + partChars,
-					firstRight + partChars + partZoom,
-					firstRight + partChars + partZoom + partEol,
-					-1
-				};
-				::SendMessageW(m_hWndStatusBar, SB_SETPARTS, kStatusBarParts, reinterpret_cast<LPARAM>(rightEdges));
+				::SendMessage(m_hWndStatusBar, WM_SIZE, 0, 0);
+				RECT rcStatusClient{};
+				::GetClientRect(m_hWndStatusBar, &rcStatusClient);
+				if (rcStatusClient.right > 0)
+				{
+					const int partChars = MulDiv(150, dpiX, 96);
+					const int partPlainText = MulDiv(190, dpiX, 96);
+					const int partZoom = MulDiv(90, dpiX, 96);
+					const int partEol = MulDiv(180, dpiX, 96);
+					const int partEncoding = MulDiv(110, dpiX, 96);
+					const int minFlexible = MulDiv(190, dpiX, 96);
+					const int fixedWidth = partChars + partPlainText + partZoom + partEol + partEncoding;
+					const int firstRight = (std::max)(minFlexible, static_cast<int>(rcStatusClient.right) - fixedWidth);
+					int rightEdges[kStatusBarParts]{
+						firstRight,
+						firstRight + partChars,
+						firstRight + partChars + partPlainText,
+						firstRight + partChars + partPlainText + partZoom,
+						firstRight + partChars + partPlainText + partZoom + partEol,
+						-1
+					};
+					::SendMessageW(m_hWndStatusBar, SB_SETPARTS, kStatusBarParts, reinterpret_cast<LPARAM>(rightEdges));
+				}
+				RECT rcStatus{};
+				::GetWindowRect(m_hWndStatusBar, &rcStatus);
+				::MapWindowPoints(nullptr, m_hWnd, reinterpret_cast<LPPOINT>(&rcStatus), 2);
+				statusHeight = rcStatus.bottom - rcStatus.top;
 			}
-			RECT rcStatus{};
-			::GetWindowRect(m_hWndStatusBar, &rcStatus);
-			::MapWindowPoints(nullptr, m_hWnd, reinterpret_cast<LPPOINT>(&rcStatus), 2);
-			statusHeight = rcStatus.bottom - rcStatus.top;
 		}
 
 		const int editTop = m_nTopBarHeight;
@@ -897,10 +1142,11 @@ public:
 		::ClientToScreen(m_hWnd, &popupOrigin);
 		m_topMenuPressedIndex = buttonIndex;
 		InvalidateTopBar();
+		ApplyPopupMenuTheme();
 
 		const UINT commandId = ::TrackPopupMenuEx(
 			hSubMenu,
-			TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON | TPM_RETURNCMD,
+			TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON | TPM_RETURNCMD | TPM_NOANIMATION,
 			popupOrigin.x,
 			popupOrigin.y,
 			m_hWnd,
@@ -926,7 +1172,11 @@ public:
 		m_toolbarPressedIndex = buttonIndex;
 		InvalidateTopBar();
 		const UINT commandId = m_toolbarCommandIds[buttonIndex];
-		if (commandId != 0)
+		if (commandId == ID_TOOLBAR_SETTINGS)
+		{
+			OpenSettingsWindow();
+		}
+		else if (commandId != 0)
 		{
 			::PostMessageW(m_hWnd, WM_COMMAND, MAKEWPARAM(commandId, 0), 0);
 		}
@@ -943,7 +1193,7 @@ public:
 		topBarBrush.CreateSolidBrush(m_topBarBackgroundColor);
 		::FillRect(hdc, &rcTopBar, topBarBrush);
 
-		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(hdc, GetUiFontHandle()));
+		HFONT hOldBaseFont = reinterpret_cast<HFONT>(::SelectObject(hdc, GetUiFontHandle()));
 		::SetBkMode(hdc, TRANSPARENT);
 		const int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
 		const int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
@@ -1010,6 +1260,11 @@ public:
 			::DrawTextW(hdc, caption.c_str(), static_cast<int>(caption.size()), &rcText, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_HIDEPREFIX);
 		}
 
+		HFONT hOldToolbarFont = nullptr;
+		if (!m_toolbarButtonRects.empty())
+		{
+			hOldToolbarFont = reinterpret_cast<HFONT>(::SelectObject(hdc, GetToolbarIconFontHandle()));
+		}
 		for (size_t i = 0; i < m_toolbarButtonRects.size(); ++i)
 		{
 			RECT rcButton = m_toolbarButtonRects[i];
@@ -1029,6 +1284,10 @@ public:
 			::SetTextColor(hdc, m_topBarTextColor);
 			::DrawTextW(hdc, caption.c_str(), static_cast<int>(caption.size()), &rcButton, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_HIDEPREFIX);
 		}
+		if (hOldToolbarFont != nullptr)
+		{
+			::SelectObject(hdc, hOldToolbarFont);
+		}
 
 		if (!m_toolbarButtonRects.empty() && (!m_topMenuButtonRects.empty() || !::IsRectEmpty(&m_topBarTitleRect)))
 		{
@@ -1042,7 +1301,7 @@ public:
 			::FillRect(hdc, &rcGroupDivider, dividerBrush);
 		}
 
-		::SelectObject(hdc, hOldFont);
+		::SelectObject(hdc, hOldBaseFont);
 	}
 
 	LRESULT OnPaint(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
@@ -1128,6 +1387,28 @@ public:
 		return 0;
 	}
 
+	LRESULT OnLButtonDown(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		const POINT pt{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+		if (pt.y >= 0 && pt.y < m_nTopBarHeight)
+		{
+			const bool isTopMenuHit = HitTestTopMenuButton(pt) >= 0;
+			const bool isToolbarHit = HitTestToolbarButton(pt) >= 0;
+			if (!isTopMenuHit && !isToolbarHit)
+			{
+				::ReleaseCapture();
+				::SendMessageW(m_hWnd, WM_NCLBUTTONDOWN, HTCAPTION, MAKELPARAM(pt.x, pt.y));
+				return 0;
+			}
+		}
+
+		bHandled = FALSE;
+		return 0;
+	}
+
 	LRESULT OnLButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
 	{
 		const POINT pt{
@@ -1185,18 +1466,28 @@ public:
 			column = 1;
 		}
 
-		const auto charsCount = static_cast<int>(GetText().size());
+		const int charsCount = m_view.GetWindowTextLength();
 		wchar_t statusPart0[64]{};
 		wchar_t statusPart1[64]{};
-		swprintf_s(statusPart0, L"Ln %d, Col %d", static_cast<int>(current_line_number), static_cast<int>(column));
-		swprintf_s(statusPart1, L"%d chars", charsCount);
+		const bool isRussianUi = static_cast<WORD>(m_nLanguage) == LANG_RUSSIAN;
+		if (isRussianUi)
+		{
+			swprintf_s(statusPart0, L"Строка %d, столбец %d", static_cast<int>(current_line_number), static_cast<int>(column));
+			swprintf_s(statusPart1, L"%d символов", charsCount);
+		}
+		else
+		{
+			swprintf_s(statusPart0, L"Ln %d, Col %d", static_cast<int>(current_line_number), static_cast<int>(column));
+			swprintf_s(statusPart1, L"%d chars", charsCount);
+		}
 		m_statusBarPartTexts[0] = statusPart0;
 		m_statusBarPartTexts[1] = statusPart1;
-		m_statusBarPartTexts[2] = L"100%";
-		m_statusBarPartTexts[3] = L"Windows (CRLF)";
-		m_statusBarPartTexts[4] = L"UTF-8";
+		m_statusBarPartTexts[2] = isRussianUi ? L"Обычный текст" : L"Plain text";
+		m_statusBarPartTexts[3] = L"100%";
+		m_statusBarPartTexts[4] = L"Windows (CRLF)";
+		m_statusBarPartTexts[5] = L"UTF-8";
 		m_statusBarText = m_statusBarPartTexts[0];
-		if (m_hWndStatusBar)
+		if (m_hWndStatusBar && m_isStatusBarVisible)
 		{
 			for (int i = 0; i < kStatusBarParts; ++i)
 			{
@@ -1301,6 +1592,7 @@ public:
 		{
 			m_bTraitsChanged = true;
 		}
+		RefreshSettingsWindow();
 		return 0;
 	}
 
@@ -1419,6 +1711,7 @@ public:
 		{
 			m_bTraitsChanged = true;
 		}
+		RefreshSettingsWindow();
 		return 0;
 	}
 
@@ -1493,6 +1786,7 @@ public:
 		RefreshToolbarLayout();
 		RefreshTopMenuLayout();
 		InvalidateTopBar();
+		RefreshSettingsWindow();
 
 		// remember language to save it on exit
 		m_nLanguage = wID;
@@ -1528,6 +1822,7 @@ public:
 		RefreshToolbarLayout();
 		RefreshTopMenuLayout();
 		InvalidateTopBar();
+		RefreshSettingsWindow();
 		return 0;
 	}
 
@@ -1696,6 +1991,19 @@ public:
 			RECT rcBody = rc;
 			rcBody.top = m_nTopBarHeight;
 			::FillRect(hdc, &rcBody, m_frameBackgroundBrush.m_hBrush);
+			if (m_hWndStatusBar && m_isStatusBarVisible && m_statusBarBackgroundBrush.m_hBrush)
+			{
+				RECT rcStatus{};
+				::GetWindowRect(m_hWndStatusBar, &rcStatus);
+				::MapWindowPoints(nullptr, m_hWnd, reinterpret_cast<LPPOINT>(&rcStatus), 2);
+				RECT rcStatusFill{
+					0,
+					rcStatus.top > 0 ? rcStatus.top - 1 : 0,
+					rc.right,
+					rc.bottom
+				};
+				::FillRect(hdc, &rcStatusFill, m_statusBarBackgroundBrush.m_hBrush);
+			}
 		}
 		else
 		{
@@ -1850,6 +2158,7 @@ public:
 		}
 
 		bHandled = FALSE;
+		CloseSettingsWindow();
 		m_text = text;
 		m_view.SetModify(FALSE);
 
@@ -1879,6 +2188,7 @@ public:
 
 	LRESULT OnDestroy(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
+		CloseSettingsWindow();
 		if (m_viewBackgroundBrush.m_hBrush)
 		{
 			m_viewBackgroundBrush.DeleteObject();
@@ -1894,6 +2204,10 @@ public:
 		if (m_fontUi.m_hFont)
 		{
 			m_fontUi.DeleteObject();
+		}
+		if (m_fontToolbarIcons.m_hFont)
+		{
+			m_fontToolbarIcons.DeleteObject();
 		}
 		if (m_hMainMenu != nullptr && ::GetMenu(m_hWnd) == nullptr)
 		{
@@ -1940,6 +2254,7 @@ public:
 
 			m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, 0);
 			m_view.SetLimitText(0x7ffffffe); // allow a lot of text to be entered
+			m_isWordWrapEnabled = ((::GetWindowLongPtrW(m_view, GWL_STYLE) & WS_HSCROLL) == 0);
 
 			CClientDC dc(*this);
 			auto dpi = GetDeviceCaps(dc, LOGPIXELSY);
@@ -1972,6 +2287,25 @@ public:
 				CLEARTYPE_QUALITY,
 				DEFAULT_PITCH,
 				L"Segoe UI");
+			if (m_fontToolbarIcons.m_hFont)
+			{
+				m_fontToolbarIcons.DeleteObject();
+			}
+			m_fontToolbarIcons.CreateFont(
+				-MulDiv(11, dpi, 72),
+				0,
+				0,
+				0,
+				FW_NORMAL,
+				FALSE,
+				FALSE,
+				FALSE,
+				DEFAULT_CHARSET,
+				OUT_DEFAULT_PRECIS,
+				CLIP_DEFAULT_PRECIS,
+				CLEARTYPE_QUALITY,
+				DEFAULT_PITCH,
+				L"Segoe MDL2 Assets");
 			if (m_hWndStatusBar && m_fontUi.m_hFont != nullptr)
 			{
 				::SendMessageW(m_hWndStatusBar, WM_SETFONT, reinterpret_cast<WPARAM>(static_cast<HFONT>(m_fontUi)), TRUE);
@@ -2476,3 +2810,561 @@ public:
 		return 0;
 	}
 };
+
+class CSettingsWindow : public CWindowImpl<CSettingsWindow>
+{
+public:
+	DECLARE_WND_CLASS(L"LockNote2SettingsWindow")
+
+	explicit CSettingsWindow(CMainFrame* owner)
+		: m_owner(owner)
+	{
+	}
+
+	BEGIN_MSG_MAP(CSettingsWindow)
+		MESSAGE_HANDLER(WM_CREATE, OnCreate)
+		MESSAGE_HANDLER(WM_SIZE, OnSize)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_CLOSE, OnClose)
+		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+	END_MSG_MAP()
+
+private:
+	enum CardId : int
+	{
+		CardTheme = 0,
+		CardFont,
+		CardWrap,
+		CardFormatting,
+		CardStatusBar,
+		CardLanguage,
+		CardCount
+	};
+
+	CMainFrame* m_owner{ nullptr };
+	CFont m_fontBase;
+	CFont m_fontTitle;
+	std::array<RECT, CardCount> m_cardRects{};
+	RECT m_infoRect{};
+	RECT m_aboutButtonRect{};
+	int m_hoveredCard{ -1 };
+	bool m_hoveredAboutButton{ false };
+
+	int Scale(const int value) const
+	{
+		if (!m_hWnd)
+		{
+			return value;
+		}
+		HDC hdc = ::GetDC(m_hWnd);
+		const int dpiX = hdc ? GetDeviceCaps(hdc, LOGPIXELSX) : 96;
+		if (hdc)
+		{
+			::ReleaseDC(m_hWnd, hdc);
+		}
+		return MulDiv(value, dpiX, 96);
+	}
+
+	bool IsRussianUi() const
+	{
+		return m_owner != nullptr && m_owner->IsRussianUi();
+	}
+
+	std::wstring ThemeLabel() const
+	{
+		if (m_owner == nullptr)
+		{
+			return L"";
+		}
+		switch (CMainFrame::ParseThemeMode(m_owner->GetThemeMode()))
+		{
+		case ThemeMode::Dark:
+			return IsRussianUi() ? L"Темная" : L"Dark";
+		case ThemeMode::Light:
+			return IsRussianUi() ? L"Светлая" : L"Light";
+		case ThemeMode::System:
+		default:
+			return IsRussianUi() ? L"Системная" : L"System";
+		}
+	}
+
+	std::wstring OnOffLabel(const bool enabled) const
+	{
+		return enabled
+			? (IsRussianUi() ? L"Вкл." : L"On")
+			: (IsRussianUi() ? L"Выкл." : L"Off");
+	}
+
+	void RecalculateLayout()
+	{
+		RECT rcClient{};
+		::GetClientRect(m_hWnd, &rcClient);
+		const int margin = Scale(28);
+		const int top = Scale(120);
+		const int gap = Scale(12);
+		const int cardHeight = Scale(72);
+		const int minInfoWidth = Scale(330);
+		const int preferredLeftWidth = Scale(520);
+
+		int leftWidth = preferredLeftWidth;
+		const int availableWidth = (rcClient.right - rcClient.left) - (margin * 3) - minInfoWidth;
+		if (availableWidth < preferredLeftWidth)
+		{
+			leftWidth = (std::max)(Scale(300), availableWidth);
+		}
+
+		int y = top;
+		for (int i = 0; i < CardCount; ++i)
+		{
+			m_cardRects[i] = {
+				margin,
+				y,
+				margin + leftWidth,
+				y + cardHeight
+			};
+			y += cardHeight + gap;
+		}
+
+		m_infoRect = {
+			margin + leftWidth + margin,
+			top,
+			rcClient.right - margin,
+			rcClient.bottom - margin
+		};
+
+		m_aboutButtonRect = {
+			m_infoRect.left,
+			m_infoRect.top + Scale(210),
+			(std::min)(m_infoRect.right, m_infoRect.left + Scale(190)),
+			m_infoRect.top + Scale(248)
+		};
+	}
+
+	void DrawCard(
+		HDC hdc,
+		const RECT& rcCard,
+		const std::wstring& title,
+		const std::wstring& value,
+		const bool hovered) const
+	{
+		CBrush cardBrush;
+		cardBrush.CreateSolidBrush(hovered ? RGB(62, 62, 66) : RGB(49, 49, 52));
+		::FillRect(hdc, &rcCard, cardBrush);
+		::FrameRect(hdc, &rcCard, static_cast<HBRUSH>(::GetStockObject(DC_BRUSH)));
+
+		RECT rcTitle = rcCard;
+		rcTitle.left += Scale(16);
+		rcTitle.top += Scale(10);
+		rcTitle.right -= Scale(12);
+		rcTitle.bottom = rcTitle.top + Scale(24);
+
+		RECT rcValue = rcCard;
+		rcValue.left += Scale(16);
+		rcValue.top += Scale(34);
+		rcValue.right -= Scale(12);
+		rcValue.bottom -= Scale(8);
+
+		::SetTextColor(hdc, RGB(240, 240, 240));
+		::DrawTextW(hdc, title.c_str(), -1, &rcTitle, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+		::SetTextColor(hdc, RGB(180, 180, 180));
+		::DrawTextW(hdc, value.c_str(), -1, &rcValue, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+	}
+
+	void DrawSettings(HDC hdc)
+	{
+		if (m_owner == nullptr)
+		{
+			return;
+		}
+
+		RECT rcClient{};
+		::GetClientRect(m_hWnd, &rcClient);
+		CBrush backgroundBrush;
+		backgroundBrush.CreateSolidBrush(RGB(32, 32, 34));
+		::FillRect(hdc, &rcClient, backgroundBrush);
+
+		::SetBkMode(hdc, TRANSPARENT);
+		::SetDCBrushColor(hdc, RGB(76, 76, 82));
+
+		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(hdc, static_cast<HFONT>(m_fontTitle)));
+		RECT rcTitle{
+			Scale(28),
+			Scale(22),
+			rcClient.right - Scale(28),
+			Scale(94)
+		};
+		::SetTextColor(hdc, RGB(245, 245, 245));
+		const wchar_t* settingsTitle = IsRussianUi() ? L"Настройки" : L"Settings";
+		::DrawTextW(hdc, settingsTitle, -1, &rcTitle, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX);
+
+		::SelectObject(hdc, static_cast<HFONT>(m_fontBase));
+		RECT rcSectionLeft{
+			Scale(28),
+			Scale(94),
+			m_cardRects[CardTheme].right,
+			Scale(120)
+		};
+		::SetTextColor(hdc, RGB(214, 214, 214));
+		const wchar_t* appearanceTitle = IsRussianUi() ? L"Параметры" : L"Preferences";
+		::DrawTextW(hdc, appearanceTitle, -1, &rcSectionLeft, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX);
+
+		DrawCard(
+			hdc,
+			m_cardRects[CardTheme],
+			IsRussianUi() ? L"Тема приложения" : L"Application theme",
+			ThemeLabel(),
+			m_hoveredCard == CardTheme);
+		DrawCard(
+			hdc,
+			m_cardRects[CardFont],
+			IsRussianUi() ? L"Шрифт" : L"Font",
+			utf8_to_wstring(m_owner->m_strFontName) + L", " + std::to_wstring(m_owner->m_nFontSize),
+			m_hoveredCard == CardFont);
+		DrawCard(
+			hdc,
+			m_cardRects[CardWrap],
+			IsRussianUi() ? L"Перенос по словам" : L"Word wrap",
+			OnOffLabel(m_owner->IsWordWrapEnabled()),
+			m_hoveredCard == CardWrap);
+		DrawCard(
+			hdc,
+			m_cardRects[CardFormatting],
+			IsRussianUi() ? L"Форматирование текста" : L"Text formatting",
+			OnOffLabel(m_owner->IsFormattingEnabled()),
+			m_hoveredCard == CardFormatting);
+		DrawCard(
+			hdc,
+			m_cardRects[CardStatusBar],
+			IsRussianUi() ? L"Строка состояния" : L"Status bar",
+			OnOffLabel(m_owner->IsStatusBarVisible()),
+			m_hoveredCard == CardStatusBar);
+		DrawCard(
+			hdc,
+			m_cardRects[CardLanguage],
+			IsRussianUi() ? L"Язык интерфейса" : L"Interface language",
+			m_owner->GetLanguageDisplayName(),
+			m_hoveredCard == CardLanguage);
+
+		RECT rcInfoTitle = m_infoRect;
+		rcInfoTitle.bottom = rcInfoTitle.top + Scale(36);
+		::SetTextColor(hdc, RGB(240, 240, 240));
+		const wchar_t* infoTitle = IsRussianUi() ? L"Информация о приложении" : L"App information";
+		::DrawTextW(hdc, infoTitle, -1, &rcInfoTitle, DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX);
+
+		RECT rcInfoBody = m_infoRect;
+		rcInfoBody.top += Scale(40);
+		rcInfoBody.bottom = rcInfoBody.top + Scale(160);
+		::SetTextColor(hdc, RGB(195, 195, 195));
+		const wchar_t* infoBody = IsRussianUi()
+			? L"LockNote2\nСамомодифицирующийся шифрованный блокнот.\n\nКарточки слева переключают доступные параметры без потери текущей функциональности."
+			: L"LockNote2\nSelf-modifying encrypted notepad.\n\nUse cards on the left to switch available settings while keeping existing LockNote2 behavior.";
+		::DrawTextW(hdc, infoBody, -1, &rcInfoBody, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+		CBrush aboutBrush;
+		aboutBrush.CreateSolidBrush(m_hoveredAboutButton ? RGB(70, 70, 76) : RGB(57, 57, 61));
+		::FillRect(hdc, &m_aboutButtonRect, aboutBrush);
+		::SetTextColor(hdc, RGB(238, 238, 238));
+		RECT rcAboutText = m_aboutButtonRect;
+		const wchar_t* aboutLabel = IsRussianUi() ? L"О приложении" : L"About app";
+		::DrawTextW(hdc, aboutLabel, -1, &rcAboutText, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+
+		if (hOldFont != nullptr)
+		{
+			::SelectObject(hdc, hOldFont);
+		}
+	}
+
+	int HitTestCard(const POINT ptClient) const
+	{
+		for (int i = 0; i < CardCount; ++i)
+		{
+			if (::PtInRect(&m_cardRects[i], ptClient))
+			{
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	LRESULT OnCreate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
+	{
+		CClientDC dc(m_hWnd);
+		const int dpiY = GetDeviceCaps(dc, LOGPIXELSY);
+		m_fontBase.CreateFont(
+			-MulDiv(10, dpiY, 72),
+			0,
+			0,
+			0,
+			FW_NORMAL,
+			FALSE,
+			FALSE,
+			FALSE,
+			DEFAULT_CHARSET,
+			OUT_DEFAULT_PRECIS,
+			CLIP_DEFAULT_PRECIS,
+			CLEARTYPE_QUALITY,
+			DEFAULT_PITCH,
+			L"Segoe UI");
+		m_fontTitle.CreateFont(
+			-MulDiv(28, dpiY, 72),
+			0,
+			0,
+			0,
+			FW_SEMIBOLD,
+			FALSE,
+			FALSE,
+			FALSE,
+			DEFAULT_CHARSET,
+			OUT_DEFAULT_PRECIS,
+			CLIP_DEFAULT_PRECIS,
+			CLEARTYPE_QUALITY,
+			DEFAULT_PITCH,
+			L"Segoe UI");
+		RecalculateLayout();
+		return 0;
+	}
+
+	LRESULT OnSize(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
+	{
+		RecalculateLayout();
+		Invalidate(FALSE);
+		return 0;
+	}
+
+	LRESULT OnPaint(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
+	{
+		PAINTSTRUCT ps{};
+		HDC hdc = ::BeginPaint(m_hWnd, &ps);
+		RECT rcClient{};
+		::GetClientRect(m_hWnd, &rcClient);
+		const int width = rcClient.right - rcClient.left;
+		const int height = rcClient.bottom - rcClient.top;
+		if (width > 0 && height > 0)
+		{
+			HDC hdcMem = ::CreateCompatibleDC(hdc);
+			HBITMAP hbmMem = ::CreateCompatibleBitmap(hdc, width, height);
+			if (hdcMem != nullptr && hbmMem != nullptr)
+			{
+				HGDIOBJ hOldBitmap = ::SelectObject(hdcMem, hbmMem);
+				DrawSettings(hdcMem);
+				::BitBlt(hdc, 0, 0, width, height, hdcMem, 0, 0, SRCCOPY);
+				::SelectObject(hdcMem, hOldBitmap);
+			}
+			else
+			{
+				DrawSettings(hdc);
+			}
+			if (hbmMem != nullptr)
+			{
+				::DeleteObject(hbmMem);
+			}
+			if (hdcMem != nullptr)
+			{
+				::DeleteDC(hdcMem);
+			}
+		}
+		::EndPaint(m_hWnd, &ps);
+		return 0;
+	}
+
+	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
+	{
+		return 1;
+	}
+
+	LRESULT OnMouseMove(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& /*bHandled*/)
+	{
+		const POINT pt{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+		const int hoveredCard = HitTestCard(pt);
+		const bool hoveredAbout = ::PtInRect(&m_aboutButtonRect, pt) != FALSE;
+		if (hoveredCard != m_hoveredCard || hoveredAbout != m_hoveredAboutButton)
+		{
+			m_hoveredCard = hoveredCard;
+			m_hoveredAboutButton = hoveredAbout;
+			Invalidate(FALSE);
+		}
+
+		TRACKMOUSEEVENT tme{ sizeof(tme) };
+		tme.dwFlags = TME_LEAVE;
+		tme.hwndTrack = m_hWnd;
+		::TrackMouseEvent(&tme);
+		return 0;
+	}
+
+	LRESULT OnMouseLeave(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
+	{
+		if (m_hoveredCard != -1 || m_hoveredAboutButton)
+		{
+			m_hoveredCard = -1;
+			m_hoveredAboutButton = false;
+			Invalidate(FALSE);
+		}
+		return 0;
+	}
+
+	LRESULT OnLButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& /*bHandled*/)
+	{
+		if (m_owner == nullptr)
+		{
+			return 0;
+		}
+
+		const POINT pt{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+
+		if (::PtInRect(&m_aboutButtonRect, pt))
+		{
+			::PostMessageW(m_owner->m_hWnd, WM_COMMAND, MAKEWPARAM(ID_APP_ABOUT, 0), 0);
+			return 0;
+		}
+
+		switch (HitTestCard(pt))
+		{
+		case CardTheme:
+		{
+			const ThemeMode current = CMainFrame::ParseThemeMode(m_owner->GetThemeMode());
+			const ThemeMode next = current == ThemeMode::System
+				? ThemeMode::Light
+				: (current == ThemeMode::Light ? ThemeMode::Dark : ThemeMode::System);
+			m_owner->ApplyThemeSetting(next);
+			break;
+		}
+		case CardFont:
+		{
+			const std::array<std::string, 7> fonts{
+				NAME_FONT_CONSOLAS,
+				NAME_FONT_CASCADIA_CODE,
+				NAME_FONT_LUCIDA_CONSOLE,
+				NAME_FONT_COURIER_NEW,
+				NAME_FONT_TAHOMA,
+				NAME_FONT_VERDANA,
+				NAME_FONT_ARIAL
+			};
+			auto it = std::find(fonts.begin(), fonts.end(), m_owner->m_strFontName);
+			if (it == fonts.end() || ++it == fonts.end())
+			{
+				m_owner->ApplyFontFaceByName(fonts.front());
+			}
+			else
+			{
+				m_owner->ApplyFontFaceByName(*it);
+			}
+			break;
+		}
+		case CardWrap:
+			m_owner->SetWordWrapEnabled(!m_owner->IsWordWrapEnabled());
+			break;
+		case CardFormatting:
+			m_owner->SetFormattingEnabled(!m_owner->IsFormattingEnabled());
+			break;
+		case CardStatusBar:
+			m_owner->SetStatusBarVisible(!m_owner->IsStatusBarVisible());
+			break;
+		case CardLanguage:
+			m_owner->ApplyLanguageById(m_owner->IsRussianUi() ? LANG_ENGLISH : LANG_RUSSIAN);
+			break;
+		default:
+			break;
+		}
+
+		Invalidate(FALSE);
+		return 0;
+	}
+
+	LRESULT OnClose(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
+	{
+		DestroyWindow();
+		return 0;
+	}
+
+	LRESULT OnDestroy(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& /*bHandled*/)
+	{
+		if (m_fontBase.m_hFont)
+		{
+			m_fontBase.DeleteObject();
+		}
+		if (m_fontTitle.m_hFont)
+		{
+			m_fontTitle.DeleteObject();
+		}
+		if (m_owner != nullptr)
+		{
+			m_owner->OnSettingsWindowClosed();
+		}
+		delete this;
+		return 0;
+	}
+};
+
+inline void CMainFrame::OpenSettingsWindow()
+{
+	if (m_settingsWindow != nullptr && ::IsWindow(m_settingsWindow->m_hWnd))
+	{
+		m_settingsWindow->ShowWindow(SW_SHOW);
+		::SetForegroundWindow(m_settingsWindow->m_hWnd);
+		return;
+	}
+
+	CSettingsWindow* settingsWindow = new CSettingsWindow(this);
+	if (settingsWindow == nullptr)
+	{
+		return;
+	}
+
+	const HWND hSettings = settingsWindow->Create(
+		m_hWnd,
+		CWindow::rcDefault,
+		IsRussianUi() ? L"Настройки - LockNote2" : L"Settings - LockNote2",
+		WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+	if (hSettings == nullptr)
+	{
+		delete settingsWindow;
+		return;
+	}
+
+	CClientDC dc(*this);
+	const int dpiX = GetDeviceCaps(dc, LOGPIXELSX);
+	const int width = MulDiv(1160, dpiX, 96);
+	const int height = MulDiv(760, dpiX, 96);
+
+	RECT rcMain{};
+	::GetWindowRect(m_hWnd, &rcMain);
+	::SetWindowPos(
+		hSettings,
+		nullptr,
+		rcMain.left + MulDiv(24, dpiX, 96),
+		rcMain.top + MulDiv(24, dpiX, 96),
+		width,
+		height,
+		SWP_NOZORDER | SWP_SHOWWINDOW);
+
+	m_settingsWindow = settingsWindow;
+}
+
+inline void CMainFrame::CloseSettingsWindow()
+{
+	if (m_settingsWindow != nullptr && ::IsWindow(m_settingsWindow->m_hWnd))
+	{
+		m_settingsWindow->DestroyWindow();
+	}
+}
+
+inline void CMainFrame::RefreshSettingsWindow()
+{
+	if (m_settingsWindow != nullptr && ::IsWindow(m_settingsWindow->m_hWnd))
+	{
+		::SetWindowTextW(
+			m_settingsWindow->m_hWnd,
+			IsRussianUi() ? L"Настройки - LockNote2" : L"Settings - LockNote2");
+		::InvalidateRect(m_settingsWindow->m_hWnd, nullptr, FALSE);
+	}
+}

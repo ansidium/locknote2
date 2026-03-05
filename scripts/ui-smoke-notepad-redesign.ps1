@@ -26,6 +26,8 @@ public static class NativeUi {
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindowEx(IntPtr hWndParent, IntPtr hWndChildAfter, string lpszClass, string lpszWindow);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+    [DllImport("user32.dll")] public static extern int GetWindowTextLengthW(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
@@ -61,33 +63,137 @@ function Get-MainWindowHandle {
     param([System.Diagnostics.Process]$Process)
 
     $Process.Refresh()
-    if ($Process.MainWindowHandle -ne 0) {
-        return [IntPtr]$Process.MainWindowHandle
+    $mainHandleRaw = $Process.MainWindowHandle
+    if ($null -ne $mainHandleRaw -and [int64]$mainHandleRaw -ne 0) {
+        $candidate = [IntPtr]$mainHandleRaw
+        return $candidate
     }
 
-    $result = [IntPtr]::Zero
+    $script:ln2MainWindowHandle = [IntPtr]::Zero
     [NativeUi]::EnumWindows({
         param($hWnd, $lParam)
         [uint32]$windowPid = 0
         [NativeUi]::GetWindowThreadProcessId($hWnd, [ref]$windowPid) | Out-Null
-        if ($windowPid -eq $Process.Id -and [NativeUi]::IsWindowVisible($hWnd)) {
+        if ($windowPid -eq $Process.Id) {
             [NativeUi+RECT]$r = New-Object NativeUi+RECT
             [NativeUi]::GetWindowRect($hWnd, [ref]$r) | Out-Null
-            if (($r.Right - $r.Left) -gt 100 -and ($r.Bottom - $r.Top) -gt 100) {
-                $script:result = $hWnd
+            if (($r.Right - $r.Left) -gt 20 -and ($r.Bottom - $r.Top) -gt 20) {
+                $script:ln2MainWindowHandle = $hWnd
                 return $false
             }
         }
         return $true
     }, [IntPtr]::Zero) | Out-Null
 
-    return $result
+    return $script:ln2MainWindowHandle
 }
 
 function Get-ChildByClass {
     param([IntPtr]$Parent, [string]$ClassName)
 
     return [NativeUi]::FindWindowEx($Parent, [IntPtr]::Zero, $ClassName, $null)
+}
+
+function Get-LargestTopWindowHandle {
+    $script:ln2LargestWindowHandle = [IntPtr]::Zero
+    $script:ln2LargestWindowArea = 0
+
+    [NativeUi]::EnumWindows({
+        param($hWnd, $lParam)
+        [NativeUi+RECT]$r = New-Object NativeUi+RECT
+        [NativeUi]::GetWindowRect($hWnd, [ref]$r) | Out-Null
+        $w = $r.Right - $r.Left
+        $h = $r.Bottom - $r.Top
+        if ($w -gt 200 -and $h -gt 150) {
+            $area = $w * $h
+            if ($area -gt $script:ln2LargestWindowArea) {
+                $script:ln2LargestWindowArea = $area
+                $script:ln2LargestWindowHandle = $hWnd
+            }
+        }
+        return $true
+    }, [IntPtr]::Zero) | Out-Null
+
+    return $script:ln2LargestWindowHandle
+}
+
+function Get-WindowTitle {
+    param([IntPtr]$Hwnd)
+
+    $len = [NativeUi]::GetWindowTextLengthW($Hwnd)
+    if ($len -le 0) {
+        return ''
+    }
+
+    $sb = New-Object System.Text.StringBuilder ($len + 1)
+    [void][NativeUi]::GetWindowTextW($Hwnd, $sb, $sb.Capacity)
+    return $sb.ToString()
+}
+
+function Get-TopWindowByTitleContains {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string[]]$Needles
+    )
+
+    $script:ln2TitleWindowHandle = [IntPtr]::Zero
+    [NativeUi]::EnumWindows({
+        param($hWnd, $lParam)
+        [uint32]$windowPid = 0
+        [NativeUi]::GetWindowThreadProcessId($hWnd, [ref]$windowPid) | Out-Null
+        if ($windowPid -ne $Process.Id -or -not [NativeUi]::IsWindowVisible($hWnd)) {
+            return $true
+        }
+
+        $title = (Get-WindowTitle -Hwnd $hWnd)
+        if ([string]::IsNullOrWhiteSpace($title)) {
+            return $true
+        }
+
+        foreach ($needle in $Needles) {
+            if ($title.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $script:ln2TitleWindowHandle = $hWnd
+                return $false
+            }
+        }
+        return $true
+    }, [IntPtr]::Zero) | Out-Null
+
+    return $script:ln2TitleWindowHandle
+}
+
+function Get-TopWindowByClassContains {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string[]]$ClassNeedles
+    )
+
+    $script:ln2ClassWindowHandle = [IntPtr]::Zero
+    [NativeUi]::EnumWindows({
+        param($hWnd, $lParam)
+        [uint32]$windowPid = 0
+        [NativeUi]::GetWindowThreadProcessId($hWnd, [ref]$windowPid) | Out-Null
+        if ($windowPid -ne $Process.Id -or -not [NativeUi]::IsWindowVisible($hWnd)) {
+            return $true
+        }
+
+        $classSb = New-Object System.Text.StringBuilder 256
+        [void][NativeUi]::GetClassNameW($hWnd, $classSb, $classSb.Capacity)
+        $className = $classSb.ToString()
+        if ([string]::IsNullOrWhiteSpace($className)) {
+            return $true
+        }
+
+        foreach ($needle in $ClassNeedles) {
+            if ($className.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $script:ln2ClassWindowHandle = $hWnd
+                return $false
+            }
+        }
+        return $true
+    }, [IntPtr]::Zero) | Out-Null
+
+    return $script:ln2ClassWindowHandle
 }
 
 function Save-WindowShot {
@@ -123,21 +229,24 @@ function Save-ActiveWindowShot {
 
     [NativeUi]::SetForegroundWindow($Hwnd) | Out-Null
     Start-Sleep -Milliseconds 160
-    [System.Windows.Forms.Clipboard]::Clear()
-    Invoke-AltPrintScreen
-
     $captured = $false
-    for ($retry = 0; $retry -lt 20; $retry++) {
-        Start-Sleep -Milliseconds 60
-        if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
-            $img = [System.Windows.Forms.Clipboard]::GetImage()
-            if ($img -ne $null) {
-                $img.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-                $img.Dispose()
-                $captured = $true
-                break
-            }
+    try {
+        [NativeUi+RECT]$r = New-Object NativeUi+RECT
+        [NativeUi]::GetWindowRect($Hwnd, [ref]$r) | Out-Null
+        $w = $r.Right - $r.Left
+        $h = $r.Bottom - $r.Top
+        if ($w -gt 1 -and $h -gt 1) {
+            $bmp = New-Object System.Drawing.Bitmap($w, $h, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+            $gfx.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size, [System.Drawing.CopyPixelOperation]::SourceCopy)
+            $gfx.Dispose()
+            $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+            $captured = $true
         }
+    }
+    catch {
+        $captured = $false
     }
 
     if (-not $captured) {
@@ -188,13 +297,32 @@ if (-not (Test-Path $artifactDir)) {
 $beforePath = Join-Path $artifactDir ("locknote2-redesign-before-{0}-final.png" -f $Tag)
 $afterPath = Join-Path $artifactDir ("locknote2-redesign-after-{0}-final.png" -f $Tag)
 $statusPath = Join-Path $artifactDir ("locknote2-statusbar-{0}-final.png" -f $Tag)
+$menuPath = Join-Path $artifactDir ("locknote2-menu-{0}-final.png" -f $Tag)
+$settingsPath = Join-Path $artifactDir ("locknote2-settings-{0}-final.png" -f $Tag)
 
 $proc = Start-Process -FilePath $ExePath -PassThru
 Start-Sleep -Milliseconds 1300
 
 $mainHwnd = [IntPtr]::Zero
-for ($i = 0; $i -lt 40; $i++) {
+for ($i = 0; $i -lt 120; $i++) {
     $mainHwnd = Get-MainWindowHandle -Process $proc
+    if ($mainHwnd -eq [IntPtr]::Zero) {
+        $procName = ''
+        try { $procName = $proc.ProcessName } catch { $procName = '' }
+        if (-not [string]::IsNullOrWhiteSpace($procName)) {
+            $siblings = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
+            foreach ($sib in $siblings) {
+                $mainHwnd = Get-MainWindowHandle -Process $sib
+                if ($mainHwnd -ne [IntPtr]::Zero) {
+                    $proc = $sib
+                    break
+                }
+            }
+        }
+    }
+    if ($mainHwnd -eq [IntPtr]::Zero) {
+        $mainHwnd = Get-LargestTopWindowHandle
+    }
     if ($mainHwnd -ne [IntPtr]::Zero) { break }
     Start-Sleep -Milliseconds 100
 }
@@ -206,6 +334,15 @@ if ($mainHwnd -eq [IntPtr]::Zero) {
 [NativeUi]::SetForegroundWindow($mainHwnd) | Out-Null
 Start-Sleep -Milliseconds 300
 
+[NativeUi+RECT]$initRect = New-Object NativeUi+RECT
+[NativeUi]::GetWindowRect($mainHwnd, [ref]$initRect) | Out-Null
+$initW = $initRect.Right - $initRect.Left
+$initH = $initRect.Bottom - $initRect.Top
+if ($initW -lt 900 -or $initH -lt 600) {
+    [NativeUi]::SetWindowPos($mainHwnd, [IntPtr]::Zero, 40, 40, 1400, 900, [NativeUi]::SWP_NOZORDER) | Out-Null
+    Start-Sleep -Milliseconds 220
+}
+
 Save-ActiveWindowShot -Hwnd $mainHwnd -Path $beforePath
 
 [NativeUi+RECT]$wc = New-Object NativeUi+RECT
@@ -213,6 +350,18 @@ Save-ActiveWindowShot -Hwnd $mainHwnd -Path $beforePath
 
 $menuY = 52
 $menuXs = @(42, 95, 205, 320, 430)
+
+# capture open menu state
+[NativeUi+POINT]$fileMenuPt = New-Object NativeUi+POINT
+$fileMenuPt.X = $menuXs[0]
+$fileMenuPt.Y = $menuY
+[NativeUi]::ClientToScreen($mainHwnd, [ref]$fileMenuPt) | Out-Null
+Invoke-Click -X $fileMenuPt.X -Y $fileMenuPt.Y
+Start-Sleep -Milliseconds 180
+Save-ActiveWindowShot -Hwnd $mainHwnd -Path $menuPath
+Invoke-PressEscape
+Start-Sleep -Milliseconds 120
+
 for ($round = 0; $round -lt 5; $round++) {
     foreach ($mx in $menuXs) {
         [NativeUi+POINT]$pt = New-Object NativeUi+POINT
@@ -269,6 +418,29 @@ $dropPt.Y = 140
 Start-Sleep -Milliseconds 120
 Invoke-PressEscape
 
+# open settings and capture
+[NativeUi+POINT]$settingsPt = New-Object NativeUi+POINT
+$settingsPt.X = [Math]::Max(40, $wc.Right - 34)
+$settingsPt.Y = $menuY
+[NativeUi]::ClientToScreen($mainHwnd, [ref]$settingsPt) | Out-Null
+Invoke-Click -X $settingsPt.X -Y $settingsPt.Y
+Start-Sleep -Milliseconds 280
+
+$settingsHwnd = [IntPtr]::Zero
+for ($i = 0; $i -lt 20; $i++) {
+    $settingsHwnd = Get-TopWindowByClassContains -Process $proc -ClassNeedles @('LockNote2SettingsWindowClass')
+    if ($settingsHwnd -ne [IntPtr]::Zero) { break }
+    Start-Sleep -Milliseconds 100
+}
+if ($settingsHwnd -ne [IntPtr]::Zero) {
+    Save-ActiveWindowShot -Hwnd $settingsHwnd -Path $settingsPath
+    Invoke-PressEscape
+    Start-Sleep -Milliseconds 180
+}
+else {
+    Save-ActiveWindowShot -Hwnd $mainHwnd -Path $settingsPath
+}
+
 Start-Sleep -Milliseconds 220
 Save-ActiveWindowShot -Hwnd $mainHwnd -Path $afterPath
 
@@ -288,3 +460,6 @@ if (-not $proc.HasExited) {
 Write-Output "before=$beforePath"
 Write-Output "after=$afterPath"
 Write-Output "status=$statusPath"
+Write-Output "menu=$menuPath"
+Write-Output "settings=$settingsPath"
+
