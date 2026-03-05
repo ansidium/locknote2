@@ -1,40 +1,45 @@
-Steganos LockNote 2.0
----------------------
-Self-modifying encrypted notepad
+## Steganos LockNote 2
+
+Self-modifying encrypted notepad  
 Copyright (C) 2024 Steganos Software GmbH
 
-Steganos LockNote 2.0 is the modern incarnation of the popular Steganos LockNote from 2006 - with support
-for High Definition displays (HDPI), new fonts, support for more languages as well as upgraded, state of
-the art encryption and password derivation technology.
+Steganos LockNote 2 is the modern continuation of the original LockNote (2006).  
+It stores encrypted text directly inside the executable file, so the program is the document.
 
-LockNote 2.0 saves your encrypted notes within itself - the program is the document. No installation and no
-data folder is required.
+No installation is required, and no external data folder is used.
 
-Official page - https://www.steganos.com/en/products/steganos-locknote-2 <br/>
-Source code - https://github.com/steganos-oss/locknote2 <br/>
-Official binary executable - https://go.steganos.com/productpage_locknote2_download_en <br/>
+## Official Links
 
+- Product page: <https://www.steganos.com/en/products/steganos-locknote-2>
+- Upstream source code: <https://github.com/steganos-oss/locknote2>
+- Official binary: <https://go.steganos.com/productpage_locknote2_download_en>
 
-Build Notes
------------
+## Features
 
-LockNote 2 builds with:
+- Portable single-file encrypted notes
+- Modern crypto stack (AES-CBC + HMAC-SHA256)
+- Password derivation via scrypt (optional PBKDF2 profile)
+- Multi-language UI
+- High-DPI support
+- Classic Notepad-like workflow
 
-* Microsoft Visual Studio 2022 17.14+ (`v143`)
-* C++ language mode: C++20 by default for CI compatibility
-* vcpkg manifest mode (`vcpkg.json`)
+## Build Requirements (Windows)
 
-Windows setup checklist:
-
-* Visual Studio 2022 with workload `Desktop development with C++`
-* VS components:
+- Microsoft Visual Studio 2022 17.14+ (`v143`)
+- Workload: `Desktop development with C++`
+- Components:
   - `MSVC v143 - VS 2022 C++ x64/x86 build tools`
   - `Windows 11 SDK` (10.0.26100+ recommended)
-  - `C++ ATL for latest v143 build tools` (required by ATL/WTL project)
-* Git for Windows
-* PowerShell 7 (`pwsh`) for QA scripts
+  - `C++ ATL for latest v143 build tools` (required by ATL/WTL)
+- Git for Windows
+- PowerShell 7 (`pwsh`) for QA scripts
 
-One-time vcpkg setup:
+This project uses:
+
+- C++20 by default (C++23 preview is optional)
+- vcpkg manifest mode (`vcpkg.json`)
+
+## One-Time vcpkg Setup
 
 ```powershell
 git clone https://github.com/microsoft/vcpkg $env:USERPROFILE\vcpkg
@@ -43,145 +48,57 @@ $env:VCPKG_ROOT = "$env:USERPROFILE\vcpkg"
 & $env:VCPKG_ROOT\vcpkg integrate install
 ```
 
-Build from command line:
+## Build from Command Line
+
+### Win32 Release
 
 ```powershell
 msbuild .\locknote2.sln /m /t:Restore,Build /p:Configuration=Release;Platform=Win32;VcpkgEnableManifest=true
 ```
 
-Optional C++23 preview mode:
+### x64 Release
+
+```powershell
+msbuild .\locknote2.sln /m /t:Restore,Build /p:Configuration=Release;Platform=x64;VcpkgEnableManifest=true
+```
+
+### Optional C++23 Preview Mode
 
 ```powershell
 msbuild .\locknote2.sln /m /t:Build /p:Configuration=Release;Platform=Win32;LockNoteCppLanguageStandard=stdcpp23preview
 ```
 
-Dependencies:
+## Dependencies
 
-* CryptoPP (from vcpkg manifest)
-* WTL 10 (from vcpkg manifest)
+- CryptoPP (via vcpkg manifest)
+- WTL 10 (via vcpkg manifest)
 
-Dependencies are restored automatically by Visual Studio when vcpkg integration
-is enabled.
+Dependencies are restored automatically when vcpkg integration is enabled.
 
-Recommended local validation on Windows:
+## Local QA
 
 ```powershell
 pwsh .\scripts\windows-qa.ps1
 ```
 
-The script performs:
+The script runs:
 
-* Debug/Release builds (`Win32`)
-* Optional MSVC Code Analysis (`RunCodeAnalysis=true`)
-* Optional `cppcheck` run (if installed)
-* AES encryption/decryption smoke tests (`tests/aeslayer_smoke.cpp`)
+- Debug/Release builds (`Win32`)
+- Optional MSVC code analysis (`RunCodeAnalysis=true`)
+- Optional `cppcheck` (if installed)
+- AES encryption/decryption smoke tests (`tests/aeslayer_smoke.cpp`)
 
-GitHub CI:
+## CI
 
-* `.github/workflows/windows-qa.yml` runs the same QA pipeline on `windows-2022` for push/PR.
+GitHub Actions workflow:
 
-Upstream tracking:
+- `.github/workflows/windows-qa.yml`
 
-* PR #6 (`steganos-oss/locknote2#6`) has been integrated in this fork.
-* Upstream issues reviewed during this audit: #3, #4, #5, #7, #8.
-* Detailed change list is maintained in `CHANGELOG.md`.
+## Changelog and History
 
+- Full release history and change details are maintained in `CHANGELOG.md`.
 
-History
--------
+## License
 
-* 2.1.1, 2026/02/14:
-	- FIX: Switched file path operations to Unicode-safe APIs (`W` WinAPI / `_wfopen_s`)
-	- FIX: Added bounded retry logic for writeback/erase helper to avoid infinite loops
-	- FIX: Added constant-time password comparison for password change flow
-	- FIX: Improved file operation error handling (temp file creation, module path checks)
-	- SECURITY: Raised compiler warning level and switched project default to C++23 preview mode
-	- QA: Added Windows QA scripts and AES smoke tests
-	- QA: Added GitHub Actions Windows QA workflow
-
-* 2.1.0, 2026/02/14:
-	- NEW: Added vcpkg manifest mode build integration (PR #6 backport)
-	- NEW: Runtime-selectable KDF profile (scrypt or PBKDF2-SHA256)
-	- NEW: Added Ctrl+S quick save command
-	- FIX: Removed online/ad menu actions from runtime UI
-	- FIX: Closing after window resize no longer asks to save unchanged text
-	- FIX: Hardened encryption/decryption checks (constant-time MAC compare and strict PKCS#7 validation)
-	- FIX: Reworked unsafe string/buffer writes and corrected `.txt` write mode
-	- FIX: Updated project security defaults (ASLR/DEP/CFG/SDL, C++20, modern include paths)
-
-* 2.0.3, 2024/03/13:
-	- NEW: new, clearer icon
-	- NEW: much smaller exe size due to optimized about dialog images
-	- FIX: about box dialog broken in some languages/dpi settings
-
-* 2.0.2, 2023/12/07:
-	- FIX: fixed problem in search results where selection was off due to utf-8 vs. wide string indexing mismatch
-	
-* 2.0.1, 2023/09/07:
-	- FIX: fixed crash in search function
-	- FIX: fixed Polish encoding
-	
-* 2.0.0, 2023/08/10:
-	- NEW: Supported languages: DE EN FR ES PT IT NL SV PL RU
-	- NEW: Language selection (from the View menu), selected language is saved
-	- NEW: HDPI support
-	- NEW: New fonts (Cascadia Code, Consolas) for Windows 10/11
-	- NEW: Steganos sub menu with quick links to Steganos' software and the latest news about LockNote 2
-	- NEW: Information about the document (Lines, chars, position) in the status bar
-	- NEW: SCrypt password and IV derivation (optionally PBKDF2 can be used via compiler switch), added salt
-	- NEW: AES CBC with HMAC-SHA256 instead of CFB with HMAC-SHA1, use PKCS#7 padding
-	- FIX: replace RNG with modern alternative
-	- FIX: fixed build warnings (replaced insecure posix functions with secure versions)
-	- FIX: fix for string resource loading
-	- FIX: Save As... functionality fixed
-	- FIX: bug where text comparison failed and LockNote asked user to save on close although nothing had changed
-	
-* 1.0.5, 2010/02/16:
-	- NEW: Changed default font to Lucida Console to avoid 1/l - O/0 confusion
-	- NEW: Font typeface can be selected (Arial/Courier New/Lucida Console/Tahoma/Verdana)
-	- NEW: Font size can be selected (9/10/12/14)
-	- NEW: LockNote saves window size, font size and font typeface
-	- FIX: Find Dialog: Enter/Tab/Escape/Space/Ctrl-V keys work
-	- FIX: Find Dialog: Message displayed if search string is not found
-	- FIX: Find Dialog: F3 brings up Find Dialog or finds next result
-	
-* 1.0.4, 2007/04/05:
-	- NEW: Added Dutch translation
-	- FIX: Path fix for cryptopp.lib in project
-
-* 1.0.3, 2006/03/06:
-	- NEW: Added Spanish translation (Castilian)
-
-* 1.0.2, 2006/02/14:
-	- NEW: Added French translation
-	- NEW: Added 'Save As...' option
-
-* 1.0.1, 2006/01/16:
-	- FIX: Removed 30k character limit
-	- NEW: Conversion displays a summary message box
-	- FIX: Wrong filename displayed when conversion fails, fixed
-	- NEW: Made conversion error message more comprehensible
-	- FIX: Made case insensitive search work
-	- FIX: Filenames are no longer being converted to lowercase
-	- FIX: Document was touched even when closing without changes
-	- NEW: Dragging files on program icon converts files as well
-
-* 1.0, 2006/01/06: Initial release.
-
-
-License
--------
-
-This program is free software; you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation; either version 2 of the License, or
-(at your option) any later version.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+This project is licensed under the GNU General Public License, version 2 or later (GPL-2.0-or-later).  
+See `LICENSE` for full text.
