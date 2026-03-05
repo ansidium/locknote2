@@ -83,8 +83,20 @@ public:
 	COLORREF m_viewTextColor{ ::GetSysColor(COLOR_WINDOWTEXT) };
 	COLORREF m_viewBackgroundColor{ ::GetSysColor(COLOR_WINDOW) };
 	COLORREF m_frameBackgroundColor{ ::GetSysColor(COLOR_3DFACE) };
+	COLORREF m_topBarBackgroundColor{ RGB(24, 36, 54) };
+	COLORREF m_topBarTextColor{ RGB(230, 230, 230) };
+	COLORREF m_topBarHoverColor{ RGB(52, 68, 92) };
+	COLORREF m_topBarPressedColor{ RGB(66, 84, 110) };
+	COLORREF m_topBarDividerColor{ RGB(12, 20, 34) };
 	CBrush m_viewBackgroundBrush;
 	CBrush m_frameBackgroundBrush;
+	HMENU m_hMainMenu{ nullptr };
+	int m_nTopBarHeight{ 46 };
+	std::vector<int> m_topMenuPopupPositions;
+	std::vector<RECT> m_topMenuButtonRects;
+	std::vector<std::wstring> m_topMenuCaptions;
+	int m_topMenuHoveredIndex{ -1 };
+	int m_topMenuPressedIndex{ -1 };
 
 	CMainFrame()
 	{
@@ -140,6 +152,10 @@ public:
 		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColorEdit)
 		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnCtlColorStatic)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
 		MESSAGE_HANDLER(WM_DROPFILES, OnDropFiles)
 		MESSAGE_HANDLER(UWM_FINDMSGSTRING, OnFindMsgString)
 		COMMAND_ID_HANDLER(ID_APP_EXIT, OnFileExit)
@@ -355,12 +371,22 @@ public:
 			m_viewTextColor = RGB(230, 230, 230);
 			m_viewBackgroundColor = RGB(30, 30, 30);
 			m_frameBackgroundColor = RGB(24, 24, 24);
+			m_topBarBackgroundColor = RGB(18, 32, 52);
+			m_topBarTextColor = RGB(235, 235, 235);
+			m_topBarHoverColor = RGB(43, 60, 86);
+			m_topBarPressedColor = RGB(58, 79, 108);
+			m_topBarDividerColor = RGB(10, 17, 28);
 		}
 		else
 		{
 			m_viewTextColor = ::GetSysColor(COLOR_WINDOWTEXT);
 			m_viewBackgroundColor = ::GetSysColor(COLOR_WINDOW);
 			m_frameBackgroundColor = ::GetSysColor(COLOR_3DFACE);
+			m_topBarBackgroundColor = RGB(229, 236, 246);
+			m_topBarTextColor = RGB(26, 26, 26);
+			m_topBarHoverColor = RGB(208, 220, 237);
+			m_topBarPressedColor = RGB(193, 209, 229);
+			m_topBarDividerColor = RGB(180, 196, 217);
 		}
 
 		if (m_viewBackgroundBrush.m_hBrush)
@@ -395,6 +421,314 @@ public:
 		{
 			::InvalidateRect(m_hWndStatusBar, nullptr, TRUE);
 		}
+		InvalidateTopBar();
+	}
+
+	HMENU GetMainMenuHandle() const
+	{
+		if (m_hMainMenu != nullptr)
+		{
+			return m_hMainMenu;
+		}
+		return ::GetMenu(m_hWnd);
+	}
+
+	void InvalidateTopBar()
+	{
+		if (!m_hWnd)
+		{
+			return;
+		}
+		RECT rc{};
+		::GetClientRect(m_hWnd, &rc);
+		rc.bottom = m_nTopBarHeight;
+		::InvalidateRect(m_hWnd, &rc, TRUE);
+	}
+
+	void RefreshTopMenuLayout()
+	{
+		m_topMenuPopupPositions.clear();
+		m_topMenuButtonRects.clear();
+		m_topMenuCaptions.clear();
+		m_topMenuHoveredIndex = -1;
+		m_topMenuPressedIndex = -1;
+
+		const HMENU hMenu = GetMainMenuHandle();
+		if (hMenu == nullptr)
+		{
+			return;
+		}
+
+		CClientDC dc(*this);
+		const int dpiX = GetDeviceCaps(dc, LOGPIXELSX);
+		const int leftPadding = MulDiv(12, dpiX, 96);
+		const int itemPaddingX = MulDiv(12, dpiX, 96);
+		const int itemSpacing = MulDiv(4, dpiX, 96);
+		const int topInset = MulDiv(5, dpiX, 96);
+		const int bottomInset = MulDiv(6, dpiX, 96);
+
+		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(dc, static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT))));
+		int x = leftPadding;
+
+		struct TopMenuEntry
+		{
+			int position;
+			std::wstring caption;
+		};
+		std::vector<TopMenuEntry> entries;
+
+		const auto tryAddPrimaryItem = [&](const int pos, const std::wstring& caption)
+		{
+			if (::GetSubMenu(hMenu, pos) != nullptr)
+			{
+				entries.push_back(TopMenuEntry{ pos, caption });
+			}
+		};
+
+		tryAddPrimaryItem(0, WSTR(IDS_MENU_FILE));
+		tryAddPrimaryItem(1, WSTR(IDS_MENU_EDIT));
+		tryAddPrimaryItem(2, WSTR(IDS_MENU_VIEW));
+		tryAddPrimaryItem(3, WSTR(IDS_MENU_HELP));
+
+		const int itemCount = ::GetMenuItemCount(hMenu);
+		for (int pos = 0; pos < itemCount; ++pos)
+		{
+			HMENU hSubMenu = ::GetSubMenu(hMenu, pos);
+			if (hSubMenu == nullptr)
+			{
+				continue;
+			}
+
+			const auto existingEntry = std::find_if(
+				entries.begin(),
+				entries.end(),
+				[pos](const TopMenuEntry& entry)
+				{
+					return entry.position == pos;
+				});
+			if (existingEntry != entries.end())
+			{
+				continue;
+			}
+
+			const bool hasEncryptionItems =
+				::GetMenuState(hSubMenu, ID_STEGANOS_PASSWORD_MANAGER, MF_BYCOMMAND) != static_cast<UINT>(-1) ||
+				::GetMenuState(hSubMenu, ID_STEGANOS_SAFE, MF_BYCOMMAND) != static_cast<UINT>(-1);
+			if (hasEncryptionItems)
+			{
+				entries.push_back(TopMenuEntry{ pos, L"Encryption" });
+				break;
+			}
+		}
+
+		for (const TopMenuEntry& entry : entries)
+		{
+			const std::wstring& caption = entry.caption;
+
+			SIZE textSize{};
+			::GetTextExtentPoint32W(dc, caption.c_str(), static_cast<int>(caption.size()), &textSize);
+
+			RECT buttonRect{
+				x,
+				topInset,
+				x + textSize.cx + (itemPaddingX * 2),
+				m_nTopBarHeight - bottomInset
+			};
+			m_topMenuPopupPositions.push_back(entry.position);
+			m_topMenuButtonRects.push_back(buttonRect);
+			m_topMenuCaptions.push_back(std::move(caption));
+			x = buttonRect.right + itemSpacing;
+		}
+
+		::SelectObject(dc, hOldFont);
+	}
+
+	void LayoutMainControls()
+	{
+		if (!m_hWnd || !m_view.m_hWnd)
+		{
+			return;
+		}
+
+		RECT rcClient{};
+		::GetClientRect(m_hWnd, &rcClient);
+
+		int statusHeight = 0;
+		if (m_hWndStatusBar)
+		{
+			::SendMessage(m_hWndStatusBar, WM_SIZE, 0, 0);
+			RECT rcStatus{};
+			::GetWindowRect(m_hWndStatusBar, &rcStatus);
+			::MapWindowPoints(nullptr, m_hWnd, reinterpret_cast<LPPOINT>(&rcStatus), 2);
+			statusHeight = rcStatus.bottom - rcStatus.top;
+		}
+
+		const int editTop = m_nTopBarHeight;
+		const int editHeight = (rcClient.bottom - rcClient.top) - editTop - statusHeight;
+		::MoveWindow(m_view, 0, editTop, rcClient.right - rcClient.left, (std::max)(0, editHeight), TRUE);
+		RefreshTopMenuLayout();
+		InvalidateTopBar();
+	}
+
+	int HitTestTopMenuButton(const POINT ptClient) const
+	{
+		if (ptClient.y < 0 || ptClient.y >= m_nTopBarHeight)
+		{
+			return -1;
+		}
+
+		for (size_t i = 0; i < m_topMenuButtonRects.size(); ++i)
+		{
+			if (::PtInRect(&m_topMenuButtonRects[i], ptClient))
+			{
+				return static_cast<int>(i);
+			}
+		}
+		return -1;
+	}
+
+	void OpenTopMenuAtIndex(const int buttonIndex)
+	{
+		const HMENU hMenu = GetMainMenuHandle();
+		if (hMenu == nullptr || buttonIndex < 0 || buttonIndex >= static_cast<int>(m_topMenuPopupPositions.size()))
+		{
+			return;
+		}
+
+		const int menuPos = m_topMenuPopupPositions[buttonIndex];
+		HMENU hSubMenu = ::GetSubMenu(hMenu, menuPos);
+		if (hSubMenu == nullptr)
+		{
+			return;
+		}
+
+		POINT popupOrigin{
+			m_topMenuButtonRects[buttonIndex].left,
+			m_topMenuButtonRects[buttonIndex].bottom
+		};
+		::ClientToScreen(m_hWnd, &popupOrigin);
+		m_topMenuPressedIndex = buttonIndex;
+		InvalidateTopBar();
+
+		const UINT commandId = ::TrackPopupMenuEx(
+			hSubMenu,
+			TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON | TPM_RETURNCMD,
+			popupOrigin.x,
+			popupOrigin.y,
+			m_hWnd,
+			nullptr);
+
+		m_topMenuPressedIndex = -1;
+		m_topMenuHoveredIndex = -1;
+		InvalidateTopBar();
+
+		if (commandId != 0)
+		{
+			::PostMessageW(m_hWnd, WM_COMMAND, MAKEWPARAM(commandId, 0), 0);
+		}
+	}
+
+	void DrawTopBar(HDC hdc)
+	{
+		RECT rcClient{};
+		::GetClientRect(m_hWnd, &rcClient);
+		RECT rcTopBar{ 0, 0, rcClient.right, m_nTopBarHeight };
+		CBrush topBrush;
+		topBrush.CreateSolidBrush(m_topBarBackgroundColor);
+		::FillRect(hdc, &rcTopBar, topBrush);
+
+		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(hdc, static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT))));
+		::SetBkMode(hdc, TRANSPARENT);
+
+		for (size_t i = 0; i < m_topMenuButtonRects.size(); ++i)
+		{
+			RECT rcButton = m_topMenuButtonRects[i];
+			const std::wstring caption = (i < m_topMenuCaptions.size()) ? m_topMenuCaptions[i] : L"";
+
+			if (static_cast<int>(i) == m_topMenuPressedIndex)
+			{
+				CBrush pressedBrush;
+				pressedBrush.CreateSolidBrush(m_topBarPressedColor);
+				::FillRect(hdc, &rcButton, pressedBrush);
+			}
+			else if (static_cast<int>(i) == m_topMenuHoveredIndex)
+			{
+				CBrush hoverBrush;
+				hoverBrush.CreateSolidBrush(m_topBarHoverColor);
+				::FillRect(hdc, &rcButton, hoverBrush);
+			}
+
+			::SetTextColor(hdc, m_topBarTextColor);
+			RECT rcText = rcButton;
+			::DrawTextW(hdc, caption.c_str(), static_cast<int>(caption.size()), &rcText, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_HIDEPREFIX);
+		}
+
+		RECT rcDivider{ 0, m_nTopBarHeight - 1, rcClient.right, m_nTopBarHeight };
+		CBrush dividerBrush;
+		dividerBrush.CreateSolidBrush(m_topBarDividerColor);
+		::FillRect(hdc, &rcDivider, dividerBrush);
+
+		::SelectObject(hdc, hOldFont);
+	}
+
+	LRESULT OnPaint(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
+	{
+		PAINTSTRUCT ps{};
+		HDC hdc = ::BeginPaint(m_hWnd, &ps);
+		DrawTopBar(hdc);
+		::EndPaint(m_hWnd, &ps);
+		bHandled = TRUE;
+		return 0;
+	}
+
+	LRESULT OnMouseMove(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		const POINT pt{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+		const int hoveredIndex = HitTestTopMenuButton(pt);
+		if (hoveredIndex != m_topMenuHoveredIndex)
+		{
+			m_topMenuHoveredIndex = hoveredIndex;
+			InvalidateTopBar();
+		}
+
+		TRACKMOUSEEVENT tme{ sizeof(tme) };
+		tme.dwFlags = TME_LEAVE;
+		tme.hwndTrack = m_hWnd;
+		::TrackMouseEvent(&tme);
+
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnMouseLeave(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
+	{
+		if (m_topMenuHoveredIndex != -1)
+		{
+			m_topMenuHoveredIndex = -1;
+			InvalidateTopBar();
+		}
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnLButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		const POINT pt{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+		const int buttonIndex = HitTestTopMenuButton(pt);
+		if (buttonIndex >= 0)
+		{
+			OpenTopMenuAtIndex(buttonIndex);
+			return 0;
+		}
+
+		bHandled = FALSE;
+		return 0;
 	}
 
 	void SetViewTextWithoutTracking(const std::string& text)
@@ -451,7 +785,7 @@ public:
 	void CheckFontSize()
 	{
 		// check the correct menu item
-		HMENU hMenu = this->GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		CMenuHandle menu(hMenu);
 		menu.CheckMenuItem(ID_VIEW_FONTSIZE_9, MF_UNCHECKED);
 		menu.CheckMenuItem(ID_VIEW_FONTSIZE_10, MF_UNCHECKED);
@@ -540,7 +874,7 @@ public:
 	void CheckFontTypeFace()
 	{
 		// check the correct menu item
-		HMENU hMenu = this->GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		CMenuHandle menu(hMenu);
 		menu.CheckMenuItem(ID_FONT_ARIAL, MF_UNCHECKED);
 		menu.CheckMenuItem(ID_FONT_COURIER_NEW, MF_UNCHECKED);
@@ -658,7 +992,7 @@ public:
 	void CheckLanguage(WORD wID)
 	{
 		// check the correct menu item
-		HMENU hMenu = this->GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		CMenuHandle menu(hMenu);
 		for (const auto& langid : m_languages)
 		{
@@ -679,7 +1013,7 @@ public:
 
 	void UpdateThemeMenuChecks()
 	{
-		HMENU hMenu = GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		if (hMenu == nullptr)
 		{
 			return;
@@ -721,11 +1055,10 @@ public:
 		Invalidate();
 		::RedrawWindow(m_hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE);
 
-		// menu bar needs special treatment
-		DrawMenuBar();
-
 		// set checkmark to selected language
 		CheckLanguage(wID);
+		RefreshTopMenuLayout();
+		InvalidateTopBar();
 
 		// remember language to save it on exit
 		m_nLanguage = wID;
@@ -758,7 +1091,8 @@ public:
 
 		UpdateThemeMenuChecks();
 		ApplyTheme();
-		DrawMenuBar();
+		RefreshTopMenuLayout();
+		InvalidateTopBar();
 		return 0;
 	}
 
@@ -811,6 +1145,7 @@ public:
 		RECT rc{};
 		::GetClientRect(m_hWnd, &rc);
 		::FillRect(hdc, &rc, m_frameBackgroundBrush.m_hBrush);
+		DrawTopBar(hdc);
 		return TRUE;
 	}
 
@@ -974,11 +1309,15 @@ public:
 		GetWindowRect(&rc);
 		m_nWindowSizeX = rc.right - rc.left;
 		m_nWindowSizeY = rc.bottom - rc.top;
-		bHandled = FALSE;
+		bHandled = TRUE;
 		if (m_nWindowSizeX != m_nOldWindowSizeX || m_nWindowSizeY != m_nOldWindowSizeY)
 		{
 			m_bTraitsChanged = true;
 			UpdateStatusBar();
+		}
+		if (wParam != SIZE_MINIMIZED)
+		{
+			LayoutMainControls();
 		}
 		return 0;
 	}
@@ -993,6 +1332,11 @@ public:
 		{
 			m_frameBackgroundBrush.DeleteObject();
 		}
+		if (m_hMainMenu != nullptr && ::GetMenu(m_hWnd) == nullptr)
+		{
+			::DestroyMenu(m_hMainMenu);
+			m_hMainMenu = nullptr;
+		}
 		bHandled = FALSE;
 		return 0;
 	}
@@ -1005,6 +1349,20 @@ public:
 			DragAcceptFiles(TRUE);
 
 			CreateSimpleStatusBar(); //m_hWndStatusBar
+			if (m_hWndStatusBar)
+			{
+				const LONG_PTR style = ::GetWindowLongPtrW(m_hWndStatusBar, GWL_STYLE);
+				::SetWindowLongPtrW(m_hWndStatusBar, GWL_STYLE, style & ~SBARS_SIZEGRIP);
+			}
+			m_hMainMenu = ::LoadMenuW(_Module.GetResourceInstance(), MAKEINTRESOURCEW(IDR_MAINFRAME));
+			if (m_hMainMenu != nullptr)
+			{
+				::SetMenu(m_hWnd, m_hMainMenu);
+			}
+			else
+			{
+				m_hMainMenu = ::GetMenu(m_hWnd);
+			}
 
 			m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, 0);
 			m_view.SetLimitText(0x7ffffffe); // allow a lot of text to be entered
@@ -1018,6 +1376,7 @@ public:
 				m_nWindowSizeX = MulDiv(m_nWindowSizeX, dpi, 96);
 				m_nWindowSizeY = MulDiv(m_nWindowSizeY, dpi, 96);
 			}
+			m_nTopBarHeight = MulDiv(46, dpi, 96);
 			m_fontEdit.CreateFont(
 				-dpi_factor_font,
 				0,
@@ -1086,9 +1445,15 @@ public:
 			}
 			CheckLanguage(static_cast<WORD>(m_nLanguage));
 			ApplyTheme();
+			RefreshTopMenuLayout();
+			if (::GetMenu(m_hWnd) != nullptr)
+			{
+				::SetMenu(m_hWnd, nullptr);
+			}
 
 			SetWindowPos(NULL, 0, 0, m_nWindowSizeX, m_nWindowSizeY, SWP_NOZORDER | SWP_NOMOVE);
 			CenterWindow();
+			LayoutMainControls();
 
 			m_view.SetFocus();
 
@@ -1131,11 +1496,12 @@ public:
 		UpdateThemeMenuChecks();
 		ConfigureEncryptionMenu();
 		UpdateEncryptionMenuChecks();
+		RefreshTopMenuLayout();
 	}
 
 	void ConfigureThemeMenu()
 	{
-		HMENU hMenu = GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		if (hMenu == nullptr)
 		{
 			return;
@@ -1165,7 +1531,7 @@ public:
 
 	void ConfigureEncryptionMenu()
 	{
-		HMENU hMenu = GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		if (hMenu == nullptr)
 		{
 			return;
@@ -1216,12 +1582,13 @@ public:
 
 		ChangeMenuItemText(ID_STEGANOS_PASSWORD_MANAGER, L"Modern encryption (scrypt)");
 		ChangeMenuItemText(ID_STEGANOS_SAFE, L"Compatibility encryption (PBKDF2-SHA256)");
-		DrawMenuBar();
+		RefreshTopMenuLayout();
+		InvalidateTopBar();
 	}
 
 	void UpdateEncryptionMenuChecks()
 	{
-		HMENU hMenu = GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		if (hMenu == nullptr)
 		{
 			return;
@@ -1239,7 +1606,7 @@ public:
 	// change the text of the given menu
 	void ChangeMenuText(const UINT& menupos, const std::wstring& strNewText)
 	{
-		HMENU hMenu = GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		if (hMenu == nullptr)
 		{
 			return;
@@ -1254,7 +1621,7 @@ public:
 	// change the text of the given menu's submenu
 	void ChangeSubMenuText(const UINT& menupos, const UINT& submenupos, const std::wstring& strNewText)
 	{
-		HMENU hMenu = GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		if (hMenu == nullptr)
 		{
 			return;
@@ -1274,7 +1641,7 @@ public:
 	// change the text of the given menu item
 	void ChangeMenuItemText(const UINT& id, const std::wstring& strNewText)
 	{
-		HMENU hMenu = GetMenu();
+		HMENU hMenu = GetMainMenuHandle();
 		if (hMenu == nullptr)
 		{
 			return;
