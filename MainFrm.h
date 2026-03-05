@@ -36,6 +36,13 @@ constexpr unsigned int DEFAULT_HEIGHT = 500;
 
 inline const UINT UWM_FINDMSGSTRING = CFindReplaceDialog::GetFindReplaceMsg();
 
+enum class ThemeMode : int
+{
+	System = 0,
+	Light = 1,
+	Dark = 2
+};
+
 class CMainFrame 
 	: public CFrameWindowImpl<CMainFrame>, public CMessageFilter, public CIdleHandler
 {
@@ -65,12 +72,19 @@ public:
 	int m_nWindowSizeY{ DEFAULT_HEIGHT };
 	int m_nFontSize{ DEFAULT_FONT_SIZE };
 	int m_nLanguage{ 0 };
+	int m_nThemeMode{ static_cast<int>(ThemeMode::System) };
 	std::map<WORD, std::wstring> m_languages{ {LANG_ENGLISH, L"en_US"}, { LANG_GERMAN, L"de_DE" }, { LANG_FRENCH, L"fr_FR" }, { LANG_SPANISH, L"es_ES" }, { LANG_PORTUGUESE, L"pt_PT" }, { LANG_ITALIAN, L"it_IT" }, { LANG_DUTCH, L"nl_NL" }, { LANG_SWEDISH, L"sv_SE" }, { LANG_POLISH, L"pl_PL" }, { LANG_RUSSIAN, L"ru_RU" } };
 
 	std::string m_strFontName{ DEFAULT_FONT_NAME };
 	AESLayer::KdfMode m_kdfMode{ AESLayer::KdfMode::Scrypt };
 	bool m_bTraitsChanged{ false };
 	bool m_ignoreEditNotifications{ false };
+	bool m_isDarkThemeApplied{ false };
+	COLORREF m_viewTextColor{ ::GetSysColor(COLOR_WINDOWTEXT) };
+	COLORREF m_viewBackgroundColor{ ::GetSysColor(COLOR_WINDOW) };
+	COLORREF m_frameBackgroundColor{ ::GetSysColor(COLOR_3DFACE) };
+	CBrush m_viewBackgroundBrush;
+	CBrush m_frameBackgroundBrush;
 
 	CMainFrame()
 	{
@@ -122,6 +136,10 @@ public:
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		MESSAGE_HANDLER(WM_CLOSE, OnClose)
+		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
+		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColorEdit)
+		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnCtlColorStatic)
+		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_DROPFILES, OnDropFiles)
 		MESSAGE_HANDLER(UWM_FINDMSGSTRING, OnFindMsgString)
 		COMMAND_ID_HANDLER(ID_APP_EXIT, OnFileExit)
@@ -160,6 +178,9 @@ public:
 		COMMAND_ID_HANDLER(LANG_RUSSIAN, OnChangeLanguage)
 		COMMAND_ID_HANDLER(ID_STEGANOS_PASSWORD_MANAGER, OnSetEncryptionMode)
 		COMMAND_ID_HANDLER(ID_STEGANOS_SAFE, OnSetEncryptionMode)
+		COMMAND_ID_HANDLER(ID_THEME_SYSTEM, OnChangeTheme)
+		COMMAND_ID_HANDLER(ID_THEME_LIGHT, OnChangeTheme)
+		COMMAND_ID_HANDLER(ID_THEME_DARK, OnChangeTheme)
 		
 		COMMAND_CODE_HANDLER(EN_CHANGE, OnChange)
 		CHAIN_MSG_MAP(CFrameWindowImpl<CMainFrame>)
@@ -188,6 +209,7 @@ public:
 		wintraits.m_nWindowSizeY = m_nWindowSizeY;
 		wintraits.m_nLangId = m_nLanguage;
 		wintraits.m_nKdfMode = static_cast<int>(m_kdfMode);
+		wintraits.m_nThemeMode = m_nThemeMode;
 		wintraits.m_strFontName = m_strFontName;
 		return Utils::SaveTextToFile(path, text, password, *this, &wintraits);
 	}
@@ -200,6 +222,179 @@ public:
 	int GetKdfMode() const
 	{
 		return static_cast<int>(m_kdfMode);
+	}
+
+	static ThemeMode ParseThemeMode(const int rawMode)
+	{
+		switch (rawMode)
+		{
+		case static_cast<int>(ThemeMode::Light):
+			return ThemeMode::Light;
+		case static_cast<int>(ThemeMode::Dark):
+			return ThemeMode::Dark;
+		case static_cast<int>(ThemeMode::System):
+		default:
+			return ThemeMode::System;
+		}
+	}
+
+	int GetThemeMode() const
+	{
+		return m_nThemeMode;
+	}
+
+	void SetThemeMode(const int rawMode)
+	{
+		m_nThemeMode = static_cast<int>(ParseThemeMode(rawMode));
+	}
+
+	bool IsHighContrastEnabled() const
+	{
+		HIGHCONTRASTW hc{ sizeof(hc) };
+		if (!::SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0))
+		{
+			return false;
+		}
+		return (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
+	}
+
+	bool IsSystemDarkThemeEnabled() const
+	{
+		DWORD value = 1;
+		DWORD valueSize = sizeof(value);
+		const LSTATUS status = ::RegGetValueW(
+			HKEY_CURRENT_USER,
+			L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+			L"AppsUseLightTheme",
+			RRF_RT_REG_DWORD,
+			nullptr,
+			&value,
+			&valueSize);
+		if (status != ERROR_SUCCESS)
+		{
+			return false;
+		}
+		return value == 0;
+	}
+
+	bool ShouldUseDarkTheme() const
+	{
+		if (IsHighContrastEnabled())
+		{
+			return false;
+		}
+
+		switch (ParseThemeMode(m_nThemeMode))
+		{
+		case ThemeMode::Dark:
+			return true;
+		case ThemeMode::Light:
+			return false;
+		case ThemeMode::System:
+		default:
+			return IsSystemDarkThemeEnabled();
+		}
+	}
+
+	void ApplyTitleBarTheme()
+	{
+		using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+		if (!m_hWnd)
+		{
+			return;
+		}
+
+		HMODULE hDwmApi = ::LoadLibraryW(L"dwmapi.dll");
+		if (!hDwmApi)
+		{
+			return;
+		}
+
+		const auto dwmSetWindowAttribute = reinterpret_cast<DwmSetWindowAttributeFn>(
+			::GetProcAddress(hDwmApi, "DwmSetWindowAttribute"));
+		if (dwmSetWindowAttribute)
+		{
+			const BOOL useDark = m_isDarkThemeApplied ? TRUE : FALSE;
+			constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+			constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
+			dwmSetWindowAttribute(m_hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDark, sizeof(useDark));
+			dwmSetWindowAttribute(m_hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, &useDark, sizeof(useDark));
+		}
+
+		::FreeLibrary(hDwmApi);
+	}
+
+	void ApplyExplorerTheme(HWND hWndTarget, const bool dark) const
+	{
+		using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+		if (hWndTarget == nullptr)
+		{
+			return;
+		}
+
+		HMODULE hUxTheme = ::LoadLibraryW(L"uxtheme.dll");
+		if (!hUxTheme)
+		{
+			return;
+		}
+
+		const auto setWindowTheme = reinterpret_cast<SetWindowThemeFn>(::GetProcAddress(hUxTheme, "SetWindowTheme"));
+		if (setWindowTheme)
+		{
+			setWindowTheme(hWndTarget, dark ? L"DarkMode_Explorer" : L"Explorer", nullptr);
+		}
+
+		::FreeLibrary(hUxTheme);
+	}
+
+	void ApplyTheme()
+	{
+		m_isDarkThemeApplied = ShouldUseDarkTheme();
+		if (m_isDarkThemeApplied)
+		{
+			m_viewTextColor = RGB(230, 230, 230);
+			m_viewBackgroundColor = RGB(30, 30, 30);
+			m_frameBackgroundColor = RGB(24, 24, 24);
+		}
+		else
+		{
+			m_viewTextColor = ::GetSysColor(COLOR_WINDOWTEXT);
+			m_viewBackgroundColor = ::GetSysColor(COLOR_WINDOW);
+			m_frameBackgroundColor = ::GetSysColor(COLOR_3DFACE);
+		}
+
+		if (m_viewBackgroundBrush.m_hBrush)
+		{
+			m_viewBackgroundBrush.DeleteObject();
+		}
+		m_viewBackgroundBrush.CreateSolidBrush(m_viewBackgroundColor);
+
+		if (m_frameBackgroundBrush.m_hBrush)
+		{
+			m_frameBackgroundBrush.DeleteObject();
+		}
+		m_frameBackgroundBrush.CreateSolidBrush(m_frameBackgroundColor);
+
+		if (m_hWndStatusBar)
+		{
+			::SendMessageW(m_hWndStatusBar, SB_SETBKCOLOR, 0, static_cast<LPARAM>(m_frameBackgroundColor));
+		}
+
+		ApplyExplorerTheme(m_hWnd, m_isDarkThemeApplied);
+		ApplyExplorerTheme(m_view.m_hWnd, m_isDarkThemeApplied);
+		ApplyExplorerTheme(m_hWndStatusBar, m_isDarkThemeApplied);
+
+		ApplyTitleBarTheme();
+
+		Invalidate();
+		if (m_view.m_hWnd)
+		{
+			m_view.Invalidate();
+		}
+		if (m_hWndStatusBar)
+		{
+			::InvalidateRect(m_hWndStatusBar, nullptr, TRUE);
+		}
 	}
 
 	void SetViewTextWithoutTracking(const std::string& text)
@@ -482,6 +677,21 @@ public:
 		menu.CheckMenuItem(wID, MF_CHECKED);
 	}
 
+	void UpdateThemeMenuChecks()
+	{
+		HMENU hMenu = GetMenu();
+		if (hMenu == nullptr)
+		{
+			return;
+		}
+
+		CMenuHandle menu(hMenu);
+		const ThemeMode activeMode = ParseThemeMode(m_nThemeMode);
+		menu.CheckMenuItem(ID_THEME_SYSTEM, MF_BYCOMMAND | (activeMode == ThemeMode::System ? MF_CHECKED : MF_UNCHECKED));
+		menu.CheckMenuItem(ID_THEME_LIGHT, MF_BYCOMMAND | (activeMode == ThemeMode::Light ? MF_CHECKED : MF_UNCHECKED));
+		menu.CheckMenuItem(ID_THEME_DARK, MF_BYCOMMAND | (activeMode == ThemeMode::Dark ? MF_CHECKED : MF_UNCHECKED));
+	}
+
 	LRESULT OnChangeLanguage(WORD wNotifyCode, WORD wID, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 	{
 		// does the edit window still contain the default text? make sure to refresh it with the selected language
@@ -522,6 +732,86 @@ public:
 		m_bTraitsChanged = true;
 
 		return 0;
+	}
+
+	LRESULT OnChangeTheme(WORD /*wNotifyCode*/, WORD wID, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
+	{
+		const ThemeMode oldMode = ParseThemeMode(m_nThemeMode);
+		switch (wID)
+		{
+		case ID_THEME_LIGHT:
+			m_nThemeMode = static_cast<int>(ThemeMode::Light);
+			break;
+		case ID_THEME_DARK:
+			m_nThemeMode = static_cast<int>(ThemeMode::Dark);
+			break;
+		case ID_THEME_SYSTEM:
+		default:
+			m_nThemeMode = static_cast<int>(ThemeMode::System);
+			break;
+		}
+
+		if (oldMode != ParseThemeMode(m_nThemeMode))
+		{
+			m_bTraitsChanged = true;
+		}
+
+		UpdateThemeMenuChecks();
+		ApplyTheme();
+		DrawMenuBar();
+		return 0;
+	}
+
+	LRESULT OnSettingChange(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
+	{
+		bHandled = FALSE;
+		if (ParseThemeMode(m_nThemeMode) == ThemeMode::System)
+		{
+			ApplyTheme();
+		}
+		return 0;
+	}
+
+	LRESULT OnCtlColorEdit(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+	{
+		HDC hdc = reinterpret_cast<HDC>(wParam);
+		HWND hwndChild = reinterpret_cast<HWND>(lParam);
+		if (hwndChild == m_view.m_hWnd && m_viewBackgroundBrush.m_hBrush)
+		{
+			::SetTextColor(hdc, m_viewTextColor);
+			::SetBkColor(hdc, m_viewBackgroundColor);
+			return reinterpret_cast<LRESULT>(m_viewBackgroundBrush.m_hBrush);
+		}
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnCtlColorStatic(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+	{
+		HDC hdc = reinterpret_cast<HDC>(wParam);
+		HWND hwndChild = reinterpret_cast<HWND>(lParam);
+		if (hwndChild == m_hWndStatusBar && m_frameBackgroundBrush.m_hBrush)
+		{
+			::SetTextColor(hdc, m_viewTextColor);
+			::SetBkColor(hdc, m_frameBackgroundColor);
+			return reinterpret_cast<LRESULT>(m_frameBackgroundBrush.m_hBrush);
+		}
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& /*bHandled*/)
+	{
+		if (!m_frameBackgroundBrush.m_hBrush)
+		{
+			return FALSE;
+		}
+
+		HDC hdc = reinterpret_cast<HDC>(wParam);
+		RECT rc{};
+		::GetClientRect(m_hWnd, &rc);
+		::FillRect(hdc, &rc, m_frameBackgroundBrush.m_hBrush);
+		return TRUE;
 	}
 
 	const int GetLanguage() const
@@ -695,6 +985,14 @@ public:
 
 	LRESULT OnDestroy(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
+		if (m_viewBackgroundBrush.m_hBrush)
+		{
+			m_viewBackgroundBrush.DeleteObject();
+		}
+		if (m_frameBackgroundBrush.m_hBrush)
+		{
+			m_frameBackgroundBrush.DeleteObject();
+		}
 		bHandled = FALSE;
 		return 0;
 	}
@@ -708,7 +1006,7 @@ public:
 
 			CreateSimpleStatusBar(); //m_hWndStatusBar
 
-			m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, WS_EX_WINDOWEDGE);
+			m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, 0);
 			m_view.SetLimitText(0x7ffffffe); // allow a lot of text to be entered
 
 			CClientDC dc(*this);
@@ -787,6 +1085,7 @@ public:
 				m_nLanguage = langid & 0b0000000111111111;
 			}
 			CheckLanguage(static_cast<WORD>(m_nLanguage));
+			ApplyTheme();
 
 			SetWindowPos(NULL, 0, 0, m_nWindowSizeX, m_nWindowSizeY, SWP_NOZORDER | SWP_NOMOVE);
 			CenterWindow();
@@ -828,8 +1127,40 @@ public:
 		ChangeMenuItemText(ID_MENU_FONT_SIZE, WSTR(IDS_MENU_FONT_SIZE));
 		ChangeMenuItemText(ID_MENU_HELP, WSTR(IDS_MENU_HELP));
 		ChangeMenuItemText(ID_APP_ABOUT, WSTR(IDS_ABOUT_TITLE));
+		ConfigureThemeMenu();
+		UpdateThemeMenuChecks();
 		ConfigureEncryptionMenu();
 		UpdateEncryptionMenuChecks();
+	}
+
+	void ConfigureThemeMenu()
+	{
+		HMENU hMenu = GetMenu();
+		if (hMenu == nullptr)
+		{
+			return;
+		}
+
+		HMENU hViewMenu = ::GetSubMenu(hMenu, 2);
+		if (hViewMenu == nullptr)
+		{
+			return;
+		}
+
+		const UINT themeSystemState = ::GetMenuState(hViewMenu, ID_THEME_SYSTEM, MF_BYCOMMAND);
+		if (themeSystemState == static_cast<UINT>(-1))
+		{
+			HMENU hThemeMenu = ::CreatePopupMenu();
+			if (hThemeMenu == nullptr)
+			{
+				return;
+			}
+
+			::AppendMenuW(hThemeMenu, MF_STRING, ID_THEME_SYSTEM, L"System");
+			::AppendMenuW(hThemeMenu, MF_STRING, ID_THEME_LIGHT, L"Light");
+			::AppendMenuW(hThemeMenu, MF_STRING, ID_THEME_DARK, L"Dark");
+			::AppendMenuW(hViewMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hThemeMenu), L"Theme");
+		}
 	}
 
 	void ConfigureEncryptionMenu()

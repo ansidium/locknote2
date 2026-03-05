@@ -143,6 +143,7 @@ namespace
 		traits.m_nFontSize = wndMain.m_nFontSize;
 		traits.m_nLangId = wndMain.GetLanguage();
 		traits.m_nKdfMode = wndMain.GetKdfMode();
+		traits.m_nThemeMode = wndMain.GetThemeMode();
 		traits.m_strFontName = wndMain.m_strFontName;
 		writeResult &= Utils::WriteWinTraitsResources(fileNameUtf8, traits);
 
@@ -372,6 +373,17 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 	else
 	{
 		wndMain.SetKdfMode(static_cast<int>(AESLayer::KdfMode::Scrypt));
+	}
+
+	std::string themeMode;
+	Utils::LoadResource("THEMEMODE", "INFORMATION", themeMode);
+	if (Utils::TryParseInt(themeMode, parsedValue))
+	{
+		wndMain.SetThemeMode(parsedValue);
+	}
+	else
+	{
+		wndMain.SetThemeMode(static_cast<int>(ThemeMode::System));
 	}
 
 	// create window

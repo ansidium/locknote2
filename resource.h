@@ -96,6 +96,9 @@
 #define ID_MENU_HELP					32795
 #define ID_MENU_FONT					32796
 #define ID_MENU_FONT_SIZE				32797
+#define ID_THEME_SYSTEM                 32798
+#define ID_THEME_LIGHT                  32799
+#define ID_THEME_DARK                   32800
 
 #define NAME_FONT_ARIAL                "Arial"
 #define NAME_FONT_COURIER_NEW          "Courier New"
@@ -110,7 +113,7 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        237
-#define _APS_NEXT_COMMAND_VALUE         32798
+#define _APS_NEXT_COMMAND_VALUE         32801
 #define _APS_NEXT_CONTROL_VALUE         1008
 #define _APS_NEXT_SYMED_VALUE           101
 #endif

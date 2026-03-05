@@ -2738,7 +2738,7 @@ END
 
 #if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_RUS)
 LANGUAGE LANG_RUSSIAN, SUBLANG_DEFAULT
-#pragma code_page(1252)
+#pragma code_page(65001)
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -2861,7 +2861,7 @@ MENUITEM "Svenska", LANG_SWEDISH
 MENUITEM "Polski", LANG_POLISH
 MENUITEM "Русский", LANG_RUSSIAN
 END
-#pragma code_page(1252)
+#pragma code_page(65001)
 END
 POPUP "Справка"
 BEGIN
@@ -3001,7 +3001,7 @@ BEGIN
 ID_APP_ABOUT            "Отображение информации о программе, номера версии и авторских прав\nО сайте"
 ID_APP_EXIT             "Выход из приложения; запрос на сохранение документов\nВыход"
 END
-#pragma code_page(1252)
+#pragma code_page(65001)
 
 STRINGTABLE
 BEGIN
@@ -3049,7 +3049,7 @@ STRINGTABLE
 BEGIN
 ID_EDIT_SELECTALL       "Выделить весь документ\nВыбрать все"
 END
-#pragma code_page(1252)
+#pragma code_page(65001)
 
 #endif    // Russian resources
 /////////////////////////////////////////////////////////////////////////////

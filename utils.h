@@ -44,6 +44,7 @@ typedef struct wintraits_t
 	int m_nFontSize;
 	int m_nLangId;
 	int m_nKdfMode;
+	int m_nThemeMode;
 	std::string m_strFontName;
 } LOCKNOTEWINTRAITS, *LPLOCKNOTEWINTRAITS;
 
@@ -56,18 +57,22 @@ namespace Utils
 		return ::GetModuleHandle(nullptr);
 	}
 
+	inline std::wstring WSTR(UINT nResourceID);
+
 	inline std::string STR(UINT nResourceID)
 	{
-		std::array<char, 16384> buffer{};
-		LoadStringA(GetModuleHandle(), nResourceID, buffer.data(), static_cast<int>(buffer.size()));
-		return buffer.data();
+		return wstring_to_utf8(WSTR(nResourceID));
 	}
 
 	inline std::wstring WSTR(UINT nResourceID)
 	{
-		std::array<char, 16384> buffer{};
-		LoadStringA(GetModuleHandle(), nResourceID, buffer.data(), static_cast<int>(buffer.size()));
-		return utf8_to_wstring(buffer.data());
+		std::array<wchar_t, 16384> buffer{};
+		const int loaded = ::LoadStringW(GetModuleHandle(), nResourceID, buffer.data(), static_cast<int>(buffer.size()));
+		if (loaded <= 0)
+		{
+			return std::wstring{};
+		}
+		return std::wstring(buffer.data(), static_cast<size_t>(loaded));
 	}
 
 	inline int MessageBox(HWND hWnd, const std::wstring& text, UINT uType)
@@ -287,6 +292,7 @@ namespace Utils
 		result &= UpdateResource(path, "FONTSIZE", "INFORMATION", std::to_string(wintraits.m_nFontSize));
 		result &= UpdateResource(path, "TYPEFACE", "INFORMATION", wintraits.m_strFontName);
 		result &= UpdateResource(path, "KDFMODE", "INFORMATION", std::to_string(wintraits.m_nKdfMode));
+		result &= UpdateResource(path, "THEMEMODE", "INFORMATION", std::to_string(wintraits.m_nThemeMode));
 		if (wintraits.m_nLangId != 0)
 		{
 			result &= UpdateResource(path, "LANGID", "INFORMATION", std::to_string(wintraits.m_nLangId));
