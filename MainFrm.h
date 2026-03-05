@@ -2660,10 +2660,10 @@ public:
 			return 0;
 		}
 
-		const int topPadding = MulDiv(10, dpiY, 96);
-		const int bottomPadding = MulDiv(10, dpiY, 96);
+		const int topPadding = MulDiv(13, dpiY, 96);
+		const int bottomPadding = MulDiv(13, dpiY, 96);
 		const int rowHeight = MulDiv(32, dpiY, 96);
-		const int rowSpacing = MulDiv(4, dpiY, 96);
+		const int rowSpacing = MulDiv(8, dpiY, 96);
 		return topPadding + rowHeight + (m_isReplacePanelVisible ? rowSpacing + rowHeight : 0) + bottomPadding;
 	}
 
@@ -2687,8 +2687,8 @@ public:
 		const int clientWidth = rcClient.right - rcClient.left;
 		const int areaTop = m_nTopBarHeight;
 		const int areaHeight = GetFindPanelAreaHeightForDpi(dpiY);
-		const int panelTop = areaTop + MulDiv(6, dpiY, 96);
-		const int panelBottom = areaTop + areaHeight - MulDiv(3, dpiY, 96);
+		const int panelTop = areaTop + MulDiv(8, dpiY, 96);
+		const int panelBottom = areaTop + areaHeight - MulDiv(4, dpiY, 96);
 
 		const int leftOuterMargin = MulDiv(16, dpiX, 96);
 		const int rightOuterMargin = MulDiv(16, dpiX, 96);
@@ -2707,13 +2707,13 @@ public:
 		m_findPanelRect.right = panelRight;
 		m_findPanelRect.bottom = panelBottom;
 
-		const int innerPadding = MulDiv(8, dpiX, 96);
+		const int innerPadding = MulDiv(10, dpiX, 96);
 		const int rowHeight = MulDiv(32, dpiY, 96);
-		const int rowSpacing = MulDiv(4, dpiY, 96);
-		const int rowTop = panelTop + MulDiv(6, dpiY, 96);
+		const int rowSpacing = MulDiv(8, dpiY, 96);
+		const int rowTop = panelTop + MulDiv(7, dpiY, 96);
 		const int iconButtonWidth = rowHeight;
-		const int iconGap = MulDiv(2, dpiX, 96);
-		const int editToIconsGap = MulDiv(7, dpiX, 96);
+		const int iconGap = MulDiv(4, dpiX, 96);
+		const int editToIconsGap = MulDiv(10, dpiX, 96);
 
 		const int rightClusterWidth = (iconButtonWidth * 4) + (iconGap * 3);
 		const int rightClusterLeft = panelRight - innerPadding - rightClusterWidth;
@@ -2743,8 +2743,8 @@ public:
 		moveControl(m_hFindPanelToggleButton, toggleLeft, rowTop, iconButtonWidth, rowHeight);
 		m_findPanelFindEditFrameRect = RECT{ findEditLeft, rowTop, safeFindEditRight, rowTop + rowHeight };
 		const int editInsetX = (std::max)(1, MulDiv(2, dpiX, 96));
-		const int editInsetTop = (std::max)(1, MulDiv(2, dpiY, 96));
-		const int editInsetBottom = (std::max)(1, MulDiv(3, dpiY, 96));
+		const int editInsetTop = (std::max)(1, MulDiv(3, dpiY, 96));
+		const int editInsetBottom = (std::max)(1, MulDiv(2, dpiY, 96));
 		moveControl(
 			m_hFindPanelFindEdit,
 			m_findPanelFindEditFrameRect.left + editInsetX,
@@ -2779,10 +2779,10 @@ public:
 		if (m_isReplacePanelVisible)
 		{
 			const int replaceTop = rowTop + rowHeight + rowSpacing;
-			const int replaceButtonWidth = MulDiv(120, dpiX, 96);
-			const int replaceAllButtonWidth = MulDiv(138, dpiX, 96);
+			const int replaceButtonWidth = MulDiv(132, dpiX, 96);
+			const int replaceAllButtonWidth = MulDiv(152, dpiX, 96);
 			const int replaceButtonsTotal = replaceButtonWidth + iconGap + replaceAllButtonWidth;
-			const int replaceEditRight = panelRight - innerPadding - replaceButtonsTotal - editToIconsGap;
+			const int replaceEditRight = panelRight - innerPadding - replaceButtonsTotal - iconGap;
 			const int replaceEditLeft = findEditLeft;
 			const int safeReplaceEditRight = (std::max)(replaceEditLeft + minEditWidth, replaceEditRight);
 			m_findPanelReplaceEditFrameRect = RECT{ replaceEditLeft, replaceTop, safeReplaceEditRight, replaceTop + rowHeight };
