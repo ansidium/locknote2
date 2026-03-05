@@ -25,6 +25,7 @@
 #include <array>
 #include <map>
 #include <vector>
+#include <cwctype>
 #include <atldlgs.h>
 //#include <windows.h>
 #include "utils.h"
@@ -88,15 +89,26 @@ public:
 	COLORREF m_topBarHoverColor{ RGB(52, 68, 92) };
 	COLORREF m_topBarPressedColor{ RGB(66, 84, 110) };
 	COLORREF m_topBarDividerColor{ RGB(12, 20, 34) };
+	COLORREF m_toolbarBackgroundColor{ RGB(15, 36, 66) };
+	COLORREF m_toolbarHoverColor{ RGB(50, 74, 106) };
+	COLORREF m_toolbarPressedColor{ RGB(73, 98, 132) };
 	CBrush m_viewBackgroundBrush;
 	CBrush m_frameBackgroundBrush;
 	HMENU m_hMainMenu{ nullptr };
-	int m_nTopBarHeight{ 46 };
+	int m_nTopBarHeight{ 34 };
+	int m_nTopMenuHeight{ 34 };
+	int m_nToolbarHeight{ 0 };
 	std::vector<int> m_topMenuPopupPositions;
 	std::vector<RECT> m_topMenuButtonRects;
 	std::vector<std::wstring> m_topMenuCaptions;
+	std::vector<UINT> m_toolbarCommandIds;
+	std::vector<RECT> m_toolbarButtonRects;
+	std::vector<std::wstring> m_toolbarButtonCaptions;
 	int m_topMenuHoveredIndex{ -1 };
 	int m_topMenuPressedIndex{ -1 };
+	int m_toolbarHoveredIndex{ -1 };
+	int m_toolbarPressedIndex{ -1 };
+	std::wstring m_statusBarText;
 
 	CMainFrame()
 	{
@@ -151,6 +163,7 @@ public:
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
 		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColorEdit)
 		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnCtlColorStatic)
+		MESSAGE_HANDLER(WM_DRAWITEM, OnDrawItem)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
@@ -363,6 +376,33 @@ public:
 		::FreeLibrary(hUxTheme);
 	}
 
+	void ApplyPopupMenuTheme() const
+	{
+		using SetPreferredAppModeFn = int(WINAPI*)(int);
+		using FlushMenuThemesFn = void(WINAPI*)();
+
+		HMODULE hUxTheme = ::LoadLibraryW(L"uxtheme.dll");
+		if (!hUxTheme)
+		{
+			return;
+		}
+
+		const auto setPreferredAppMode = reinterpret_cast<SetPreferredAppModeFn>(::GetProcAddress(hUxTheme, MAKEINTRESOURCEA(135)));
+		const auto flushMenuThemes = reinterpret_cast<FlushMenuThemesFn>(::GetProcAddress(hUxTheme, MAKEINTRESOURCEA(136)));
+		if (setPreferredAppMode)
+		{
+			constexpr int AppModeDefault = 0;
+			constexpr int AppModeAllowDark = 1;
+			setPreferredAppMode(m_isDarkThemeApplied ? AppModeAllowDark : AppModeDefault);
+		}
+		if (flushMenuThemes)
+		{
+			flushMenuThemes();
+		}
+
+		::FreeLibrary(hUxTheme);
+	}
+
 	void ApplyTheme()
 	{
 		m_isDarkThemeApplied = ShouldUseDarkTheme();
@@ -376,6 +416,9 @@ public:
 			m_topBarHoverColor = RGB(43, 60, 86);
 			m_topBarPressedColor = RGB(58, 79, 108);
 			m_topBarDividerColor = RGB(10, 17, 28);
+			m_toolbarBackgroundColor = RGB(14, 33, 59);
+			m_toolbarHoverColor = RGB(43, 63, 92);
+			m_toolbarPressedColor = RGB(60, 82, 113);
 		}
 		else
 		{
@@ -387,6 +430,9 @@ public:
 			m_topBarHoverColor = RGB(208, 220, 237);
 			m_topBarPressedColor = RGB(193, 209, 229);
 			m_topBarDividerColor = RGB(180, 196, 217);
+			m_toolbarBackgroundColor = RGB(213, 225, 241);
+			m_toolbarHoverColor = RGB(188, 205, 228);
+			m_toolbarPressedColor = RGB(173, 192, 217);
 		}
 
 		if (m_viewBackgroundBrush.m_hBrush)
@@ -411,6 +457,7 @@ public:
 		ApplyExplorerTheme(m_hWndStatusBar, m_isDarkThemeApplied);
 
 		ApplyTitleBarTheme();
+		ApplyPopupMenuTheme();
 
 		Invalidate();
 		if (m_view.m_hWnd)
@@ -532,11 +579,88 @@ public:
 				x,
 				topInset,
 				x + textSize.cx + (itemPaddingX * 2),
-				m_nTopBarHeight - bottomInset
+				m_nTopMenuHeight - bottomInset
 			};
 			m_topMenuPopupPositions.push_back(entry.position);
 			m_topMenuButtonRects.push_back(buttonRect);
 			m_topMenuCaptions.push_back(std::move(caption));
+			x = buttonRect.right + itemSpacing;
+		}
+
+		::SelectObject(dc, hOldFont);
+	}
+
+	static std::wstring BuildToolbarCaption(const std::wstring& sourceText)
+	{
+		std::wstring caption = sourceText;
+		caption.erase(std::remove(caption.begin(), caption.end(), L'&'), caption.end());
+		const size_t tabPos = caption.find(L'\t');
+		if (tabPos != std::wstring::npos)
+		{
+			caption = caption.substr(0, tabPos);
+		}
+		while (!caption.empty() && std::iswspace(caption.back()))
+		{
+			caption.pop_back();
+		}
+		return caption;
+	}
+
+	void RefreshToolbarLayout()
+	{
+		m_toolbarCommandIds.clear();
+		m_toolbarButtonRects.clear();
+		m_toolbarButtonCaptions.clear();
+		m_toolbarHoveredIndex = -1;
+		m_toolbarPressedIndex = -1;
+		if (m_nToolbarHeight <= 0 || m_nTopBarHeight <= m_nTopMenuHeight)
+		{
+			return;
+		}
+
+		CClientDC dc(*this);
+		const int dpiX = GetDeviceCaps(dc, LOGPIXELSX);
+		const int leftPadding = MulDiv(12, dpiX, 96);
+		const int itemPaddingX = MulDiv(10, dpiX, 96);
+		const int itemSpacing = MulDiv(6, dpiX, 96);
+		const int topInset = m_nTopMenuHeight + MulDiv(5, dpiX, 96);
+		const int bottomInset = m_nTopBarHeight - MulDiv(6, dpiX, 96);
+
+		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(dc, static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT))));
+		int x = leftPadding;
+
+		struct ToolbarEntry
+		{
+			UINT commandId;
+			std::wstring caption;
+		};
+		const std::vector<ToolbarEntry> entries{
+			{ ID_EDIT_UNDO, BuildToolbarCaption(WSTR(IDS_MENUITEM_UNDO)) },
+			{ ID_EDIT_CUT, BuildToolbarCaption(WSTR(IDS_MENUITEM_CUT)) },
+			{ ID_EDIT_COPY, BuildToolbarCaption(WSTR(IDS_MENUITEM_COPY)) },
+			{ ID_EDIT_PASTE, BuildToolbarCaption(WSTR(IDS_MENUITEM_PASTE)) },
+			{ ID_EDIT_FIND, BuildToolbarCaption(WSTR(IDS_MENUITEM_FIND)) },
+			{ ID_EDIT_FINDNEXT, BuildToolbarCaption(WSTR(IDS_MENUITEM_FINDNEXT)) }
+		};
+
+		for (const auto& entry : entries)
+		{
+			if (entry.caption.empty())
+			{
+				continue;
+			}
+
+			SIZE textSize{};
+			::GetTextExtentPoint32W(dc, entry.caption.c_str(), static_cast<int>(entry.caption.size()), &textSize);
+			RECT buttonRect{
+				x,
+				topInset,
+				x + textSize.cx + (itemPaddingX * 2),
+				bottomInset
+			};
+			m_toolbarCommandIds.push_back(entry.commandId);
+			m_toolbarButtonRects.push_back(buttonRect);
+			m_toolbarButtonCaptions.push_back(entry.caption);
 			x = buttonRect.right + itemSpacing;
 		}
 
@@ -567,12 +691,13 @@ public:
 		const int editHeight = (rcClient.bottom - rcClient.top) - editTop - statusHeight;
 		::MoveWindow(m_view, 0, editTop, rcClient.right - rcClient.left, (std::max)(0, editHeight), TRUE);
 		RefreshTopMenuLayout();
+		RefreshToolbarLayout();
 		InvalidateTopBar();
 	}
 
 	int HitTestTopMenuButton(const POINT ptClient) const
 	{
-		if (ptClient.y < 0 || ptClient.y >= m_nTopBarHeight)
+		if (ptClient.y < 0 || ptClient.y >= m_nTopMenuHeight)
 		{
 			return -1;
 		}
@@ -580,6 +705,27 @@ public:
 		for (size_t i = 0; i < m_topMenuButtonRects.size(); ++i)
 		{
 			if (::PtInRect(&m_topMenuButtonRects[i], ptClient))
+			{
+				return static_cast<int>(i);
+			}
+		}
+		return -1;
+	}
+
+	int HitTestToolbarButton(const POINT ptClient) const
+	{
+		if (m_nToolbarHeight <= 0)
+		{
+			return -1;
+		}
+		if (ptClient.y < m_nTopMenuHeight || ptClient.y >= m_nTopBarHeight)
+		{
+			return -1;
+		}
+
+		for (size_t i = 0; i < m_toolbarButtonRects.size(); ++i)
+		{
+			if (::PtInRect(&m_toolbarButtonRects[i], ptClient))
 			{
 				return static_cast<int>(i);
 			}
@@ -628,14 +774,36 @@ public:
 		}
 	}
 
+	void ExecuteToolbarCommand(const int buttonIndex)
+	{
+		if (buttonIndex < 0 || buttonIndex >= static_cast<int>(m_toolbarCommandIds.size()))
+		{
+			return;
+		}
+
+		m_toolbarPressedIndex = buttonIndex;
+		InvalidateTopBar();
+		const UINT commandId = m_toolbarCommandIds[buttonIndex];
+		::PostMessageW(m_hWnd, WM_COMMAND, MAKEWPARAM(commandId, 0), 0);
+		m_toolbarPressedIndex = -1;
+		InvalidateTopBar();
+	}
+
 	void DrawTopBar(HDC hdc)
 	{
 		RECT rcClient{};
 		::GetClientRect(m_hWnd, &rcClient);
-		RECT rcTopBar{ 0, 0, rcClient.right, m_nTopBarHeight };
-		CBrush topBrush;
-		topBrush.CreateSolidBrush(m_topBarBackgroundColor);
-		::FillRect(hdc, &rcTopBar, topBrush);
+		RECT rcMenuBar{ 0, 0, rcClient.right, m_nTopMenuHeight };
+		CBrush menuBrush;
+		menuBrush.CreateSolidBrush(m_topBarBackgroundColor);
+		::FillRect(hdc, &rcMenuBar, menuBrush);
+		if (m_nToolbarHeight > 0 && m_nTopBarHeight > m_nTopMenuHeight)
+		{
+			RECT rcToolbar{ 0, m_nTopMenuHeight, rcClient.right, m_nTopBarHeight };
+			CBrush toolbarBrush;
+			toolbarBrush.CreateSolidBrush(m_toolbarBackgroundColor);
+			::FillRect(hdc, &rcToolbar, toolbarBrush);
+		}
 
 		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(hdc, static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT))));
 		::SetBkMode(hdc, TRANSPARENT);
@@ -663,10 +831,38 @@ public:
 			::DrawTextW(hdc, caption.c_str(), static_cast<int>(caption.size()), &rcText, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_HIDEPREFIX);
 		}
 
-		RECT rcDivider{ 0, m_nTopBarHeight - 1, rcClient.right, m_nTopBarHeight };
+		for (size_t i = 0; i < m_toolbarButtonRects.size(); ++i)
+		{
+			RECT rcButton = m_toolbarButtonRects[i];
+			const std::wstring caption = (i < m_toolbarButtonCaptions.size()) ? m_toolbarButtonCaptions[i] : L"";
+
+			if (static_cast<int>(i) == m_toolbarPressedIndex)
+			{
+				CBrush pressedBrush;
+				pressedBrush.CreateSolidBrush(m_toolbarPressedColor);
+				::FillRect(hdc, &rcButton, pressedBrush);
+			}
+			else if (static_cast<int>(i) == m_toolbarHoveredIndex)
+			{
+				CBrush hoverBrush;
+				hoverBrush.CreateSolidBrush(m_toolbarHoverColor);
+				::FillRect(hdc, &rcButton, hoverBrush);
+			}
+
+			::SetTextColor(hdc, m_topBarTextColor);
+			RECT rcText = rcButton;
+			::DrawTextW(hdc, caption.c_str(), static_cast<int>(caption.size()), &rcText, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_HIDEPREFIX);
+		}
+
 		CBrush dividerBrush;
 		dividerBrush.CreateSolidBrush(m_topBarDividerColor);
-		::FillRect(hdc, &rcDivider, dividerBrush);
+		if (m_nToolbarHeight > 0 && m_nTopBarHeight > m_nTopMenuHeight)
+		{
+			RECT rcMidDivider{ 0, m_nTopMenuHeight - 1, rcClient.right, m_nTopMenuHeight };
+			::FillRect(hdc, &rcMidDivider, dividerBrush);
+		}
+		RECT rcBottomDivider{ 0, m_nTopBarHeight - 1, rcClient.right, m_nTopBarHeight };
+		::FillRect(hdc, &rcBottomDivider, dividerBrush);
 
 		::SelectObject(hdc, hOldFont);
 	}
@@ -687,10 +883,12 @@ public:
 			GET_X_LPARAM(lParam),
 			GET_Y_LPARAM(lParam)
 		};
-		const int hoveredIndex = HitTestTopMenuButton(pt);
-		if (hoveredIndex != m_topMenuHoveredIndex)
+		const int hoveredMenuIndex = HitTestTopMenuButton(pt);
+		const int hoveredToolbarIndex = HitTestToolbarButton(pt);
+		if (hoveredMenuIndex != m_topMenuHoveredIndex || hoveredToolbarIndex != m_toolbarHoveredIndex)
 		{
-			m_topMenuHoveredIndex = hoveredIndex;
+			m_topMenuHoveredIndex = hoveredMenuIndex;
+			m_toolbarHoveredIndex = hoveredToolbarIndex;
 			InvalidateTopBar();
 		}
 
@@ -705,9 +903,10 @@ public:
 
 	LRESULT OnMouseLeave(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
-		if (m_topMenuHoveredIndex != -1)
+		if (m_topMenuHoveredIndex != -1 || m_toolbarHoveredIndex != -1)
 		{
 			m_topMenuHoveredIndex = -1;
+			m_toolbarHoveredIndex = -1;
 			InvalidateTopBar();
 		}
 		bHandled = FALSE;
@@ -720,6 +919,13 @@ public:
 			GET_X_LPARAM(lParam),
 			GET_Y_LPARAM(lParam)
 		};
+		const int toolbarIndex = HitTestToolbarButton(pt);
+		if (toolbarIndex >= 0)
+		{
+			ExecuteToolbarCommand(toolbarIndex);
+			return 0;
+		}
+
 		const int buttonIndex = HitTestTopMenuButton(pt);
 		if (buttonIndex >= 0)
 		{
@@ -773,8 +979,12 @@ public:
 			static_cast<int>(GetText().size()),
 			static_cast<int>(current_line_number),
 			static_cast<int>(column));
-		const std::wstring wideStatusText = utf8_to_wstring(statusText.data());
-		SendMessage(m_hWndStatusBar, WM_SETTEXT, wideStatusText.size() + 1, reinterpret_cast<LPARAM>(wideStatusText.c_str()));
+		m_statusBarText = utf8_to_wstring(statusText.data());
+		if (m_hWndStatusBar)
+		{
+			SendMessageW(m_hWndStatusBar, SB_SETTEXTW, static_cast<WPARAM>(SBT_OWNERDRAW), reinterpret_cast<LPARAM>(m_statusBarText.c_str()));
+			::InvalidateRect(m_hWndStatusBar, nullptr, TRUE);
+		}
 
 		/*std::stringstream ss;
 		ss << num_lines << _T(" lines, ") << GetText().size() << _T(" characters. Line: ");
@@ -1058,6 +1268,7 @@ public:
 		// set checkmark to selected language
 		CheckLanguage(wID);
 		RefreshTopMenuLayout();
+		RefreshToolbarLayout();
 		InvalidateTopBar();
 
 		// remember language to save it on exit
@@ -1092,6 +1303,7 @@ public:
 		UpdateThemeMenuChecks();
 		ApplyTheme();
 		RefreshTopMenuLayout();
+		RefreshToolbarLayout();
 		InvalidateTopBar();
 		return 0;
 	}
@@ -1132,6 +1344,34 @@ public:
 		}
 		bHandled = FALSE;
 		return 0;
+	}
+
+	LRESULT OnDrawItem(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		const auto* pDrawItem = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+		if (pDrawItem == nullptr || pDrawItem->hwndItem != m_hWndStatusBar)
+		{
+			bHandled = FALSE;
+			return 0;
+		}
+
+		HDC hdc = pDrawItem->hDC;
+		RECT rc = pDrawItem->rcItem;
+		if (m_frameBackgroundBrush.m_hBrush)
+		{
+			::FillRect(hdc, &rc, m_frameBackgroundBrush.m_hBrush);
+		}
+
+		::SetBkMode(hdc, TRANSPARENT);
+		::SetTextColor(hdc, m_viewTextColor);
+		RECT rcText = rc;
+		rcText.left += 8;
+		const auto* statusTextPtr = reinterpret_cast<const wchar_t*>(pDrawItem->itemData);
+		const wchar_t* renderText = (statusTextPtr != nullptr) ? statusTextPtr : m_statusBarText.c_str();
+		::DrawTextW(hdc, renderText, -1, &rcText, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+		bHandled = TRUE;
+		return TRUE;
 	}
 
 	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& /*bHandled*/)
@@ -1376,7 +1616,9 @@ public:
 				m_nWindowSizeX = MulDiv(m_nWindowSizeX, dpi, 96);
 				m_nWindowSizeY = MulDiv(m_nWindowSizeY, dpi, 96);
 			}
-			m_nTopBarHeight = MulDiv(46, dpi, 96);
+			m_nTopMenuHeight = MulDiv(34, dpi, 96);
+			m_nToolbarHeight = 0;
+			m_nTopBarHeight = m_nTopMenuHeight;
 			m_fontEdit.CreateFont(
 				-dpi_factor_font,
 				0,
@@ -1497,6 +1739,7 @@ public:
 		ConfigureEncryptionMenu();
 		UpdateEncryptionMenuChecks();
 		RefreshTopMenuLayout();
+		RefreshToolbarLayout();
 	}
 
 	void ConfigureThemeMenu()
