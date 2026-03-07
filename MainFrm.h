@@ -65,6 +65,23 @@ class CMainFrame
 public:
 	DECLARE_FRAME_WND_CLASS(NULL, IDR_MAINFRAME)
 
+	static DWORD GetWndStyle(DWORD dwStyle)
+	{
+		if (dwStyle == 0)
+		{
+			dwStyle = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+		}
+
+		dwStyle |= WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+		dwStyle &= ~WS_CAPTION;
+		return dwStyle;
+	}
+
+	static DWORD GetWndExStyle(DWORD dwExStyle)
+	{
+		return dwExStyle;
+	}
+
 	struct UndoBuffer
 	{
 		int m_nStartChar;
@@ -78,6 +95,7 @@ public:
 	CFont m_fontEdit;
 	CFont m_fontUi;
 	CFont m_fontToolbarIcons;
+	CFont m_fontTitleBarIcons;
 	CFont m_fontFindPanelText;
 	CFont m_fontFindPanelIcons;
 	std::string m_text;
@@ -119,11 +137,21 @@ public:
 	static constexpr UINT kFindPanelReplaceAllButtonId = 0xE928;
 	static constexpr UINT kFindPanelOptionMatchCaseId = 0xE929;
 	static constexpr UINT kFindPanelOptionWrapId = 0xE92A;
+	static constexpr UINT_PTR kTopBarAnimationTimerId = 0xE92B;
+	static constexpr UINT kTopBarAnimationIntervalMs = 16;
+	static constexpr UINT kTopBarAnimationDurationMs = 144;
+	static constexpr int kMinimumWindowTrackWidth = 680;
+	static constexpr int kMinimumWindowTrackHeight = 440;
 	static constexpr int kStoredWindowMinWidth = 320;
 	static constexpr int kStoredWindowMinHeight = 240;
+	static constexpr int kTitleBarButtonMinimize = 0;
+	static constexpr int kTitleBarButtonMaximize = 1;
+	static constexpr int kTitleBarButtonClose = 2;
+	static constexpr int kTitleBarButtonCount = 3;
 	COLORREF m_viewTextColor{ ::GetSysColor(COLOR_WINDOWTEXT) };
 	COLORREF m_viewBackgroundColor{ ::GetSysColor(COLOR_WINDOW) };
 	COLORREF m_frameBackgroundColor{ ::GetSysColor(COLOR_3DFACE) };
+	COLORREF m_titleBarBackgroundColor{ RGB(24, 24, 24) };
 	COLORREF m_topBarBackgroundColor{ RGB(32, 32, 32) };
 	COLORREF m_topBarTextColor{ RGB(232, 232, 232) };
 	COLORREF m_topBarHoverColor{ RGB(57, 57, 57) };
@@ -148,8 +176,9 @@ public:
 	CBrush m_findPanelInputBrush;
 	HMENU m_hMainMenu{ nullptr };
 	WNDPROC m_findDialogOriginalProc{ nullptr };
-	int m_nTopBarHeight{ 42 };
-	int m_nTopMenuHeight{ 42 };
+	int m_nTopBarHeight{ 50 };
+	int m_nTopTitleBarHeight{ 50 };
+	int m_nTopMenuHeight{ 50 };
 	int m_nToolbarHeight{ 0 };
 	std::vector<int> m_topMenuPopupPositions;
 	std::vector<RECT> m_topMenuButtonRects;
@@ -159,12 +188,25 @@ public:
 	std::vector<UINT> m_toolbarCommandIds;
 	std::vector<RECT> m_toolbarButtonRects;
 	std::vector<std::wstring> m_toolbarButtonCaptions;
+	RECT m_topBarTitleBandRect{};
+	RECT m_topBarIconRect{};
 	RECT m_topBarTitleRect{};
+	RECT m_topBarTabCloseRect{};
+	RECT m_topBarAddButtonRect{};
+	std::array<RECT, kTitleBarButtonCount> m_titleBarButtonRects{};
 	std::wstring m_topBarTitleText;
+	int m_titleBarHoveredButtonIndex{ -1 };
+	int m_titleBarPressedButtonIndex{ -1 };
 	int m_topMenuHoveredIndex{ -1 };
 	int m_topMenuPressedIndex{ -1 };
 	int m_toolbarHoveredIndex{ -1 };
 	int m_toolbarPressedIndex{ -1 };
+	BYTE m_topMenuHoverBlend{ 0 };
+	BYTE m_titleBarHoverBlend{ 0 };
+	bool m_topBarAnimationTimerActive{ false };
+	bool m_hasPreparedInitialWindowSize{ false };
+	bool m_hasLoadedPersistedWindowSize{ false };
+	UINT m_lastSizeMessageType{ SIZE_RESTORED };
 	std::wstring m_statusBarText;
 	std::array<std::wstring, kStatusBarParts> m_statusBarPartTexts;
 	HWND m_hFindPanelToggleButton{ nullptr };
@@ -180,6 +222,7 @@ public:
 	bool m_isFindPanelVisible{ false };
 	bool m_isReplacePanelVisible{ false };
 	bool m_isFindWrapEnabled{ true };
+	HWND m_hHotFindPanelButton{ nullptr };
 	RECT m_findPanelRect{};
 	RECT m_findPanelFindEditFrameRect{};
 	RECT m_findPanelReplaceEditFrameRect{};
@@ -195,6 +238,14 @@ public:
 	{
 		if (pMsg != nullptr && pMsg->message == WM_KEYDOWN)
 		{
+			const bool ctrlPressed = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
+			const bool shiftPressed = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
+			if (ctrlPressed && shiftPressed && pMsg->wParam == 'P')
+			{
+				ShowCommandPalette();
+				return TRUE;
+			}
+
 			const HWND hFocus = ::GetFocus();
 			if (hFocus == m_hFindPanelFindEdit && pMsg->wParam == VK_RETURN)
 			{
@@ -254,19 +305,30 @@ public:
 
 	BEGIN_MSG_MAP(CMainFrame)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
+		MESSAGE_HANDLER(WM_ACTIVATE, OnActivate)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		MESSAGE_HANDLER(WM_CLOSE, OnClose)
 		MESSAGE_HANDLER(WM_SETTINGCHANGE, OnSettingChange)
+		MESSAGE_HANDLER(WM_GETMINMAXINFO, OnGetMinMaxInfo)
+		MESSAGE_HANDLER(WM_NCCALCSIZE, OnNcCalcSize)
+		MESSAGE_HANDLER(WM_NCHITTEST, OnNcHitTest)
+		MESSAGE_HANDLER(WM_NCACTIVATE, OnNcActivate)
 		MESSAGE_HANDLER(WM_CTLCOLOREDIT, OnCtlColorEdit)
 		MESSAGE_HANDLER(WM_CTLCOLORSTATIC, OnCtlColorStatic)
 		MESSAGE_HANDLER(WM_DRAWITEM, OnDrawItem)
 		MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
 		MESSAGE_HANDLER(WM_PAINT, OnPaint)
+		MESSAGE_HANDLER(WM_CONTEXTMENU, OnContextMenu)
 		MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
 		MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+		MESSAGE_HANDLER(WM_TIMER, OnTimer)
 		MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
+		MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDblClk)
 		MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+		MESSAGE_HANDLER(WM_RBUTTONUP, OnRButtonUp)
+		MESSAGE_HANDLER(WM_NCRBUTTONUP, OnNcRButtonUp)
+		MESSAGE_HANDLER(WM_CANCELMODE, OnCancelMode)
 		MESSAGE_HANDLER(WM_ENTERMENULOOP, OnEnterMenuLoop)
 		MESSAGE_HANDLER(WM_EXITMENULOOP, OnExitMenuLoop)
 		MESSAGE_HANDLER(WM_MENUSELECT, OnMenuSelect)
@@ -533,8 +595,58 @@ public:
 		}
 		m_isWordWrapEnabled = enabled;
 		UpdateEditorVerticalScrollbarVisibility();
+		UpdateEditorFormattingRect();
 		UpdateStatusBar();
 		m_view.Invalidate();
+	}
+
+	bool ShouldShowEditorVerticalScrollbar() const
+	{
+		if (!m_view.m_hWnd || !::IsWindow(m_view.m_hWnd))
+		{
+			return false;
+		}
+
+		RECT textRect{};
+		::SendMessageW(m_view.m_hWnd, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&textRect));
+		const int textHeight = static_cast<int>(textRect.bottom - textRect.top);
+		if (textHeight <= 0)
+		{
+			return false;
+		}
+
+		int lineHeight = 0;
+		HDC hdc = ::GetDC(m_view.m_hWnd);
+		if (hdc != nullptr)
+		{
+			const HFONT hEditFont = reinterpret_cast<HFONT>(::SendMessageW(m_view.m_hWnd, WM_GETFONT, 0, 0));
+			HGDIOBJ hOldObject = nullptr;
+			if (hEditFont != nullptr)
+			{
+				hOldObject = ::SelectObject(hdc, hEditFont);
+			}
+
+			TEXTMETRICW tm{};
+			if (::GetTextMetricsW(hdc, &tm))
+			{
+				lineHeight = tm.tmHeight + tm.tmExternalLeading;
+			}
+
+			if (hOldObject != nullptr)
+			{
+				::SelectObject(hdc, hOldObject);
+			}
+			::ReleaseDC(m_view.m_hWnd, hdc);
+		}
+
+		if (lineHeight <= 0)
+		{
+			lineHeight = 1;
+		}
+
+		const int visibleLines = std::max(1, textHeight / lineHeight);
+		const int lineCount = static_cast<int>(::SendMessageW(m_view.m_hWnd, EM_GETLINECOUNT, 0, 0));
+		return lineCount > visibleLines;
 	}
 
 	void UpdateEditorVerticalScrollbarVisibility() const
@@ -544,41 +656,45 @@ public:
 			return;
 		}
 
-		RECT rcClient{};
-		::GetClientRect(m_view.m_hWnd, &rcClient);
-		const int clientHeight = rcClient.bottom - rcClient.top;
-		if (clientHeight <= 0)
+		const bool shouldShowScrollbar = ShouldShowEditorVerticalScrollbar();
+		const LONG_PTR oldStyle = ::GetWindowLongPtrW(m_view.m_hWnd, GWL_STYLE);
+		LONG_PTR newStyle = oldStyle;
+		if (shouldShowScrollbar)
 		{
-			::ShowScrollBar(m_view.m_hWnd, SB_VERT, FALSE);
+			newStyle |= (WS_VSCROLL | ES_AUTOVSCROLL);
+		}
+		else
+		{
+			newStyle &= ~WS_VSCROLL;
+		}
+
+		if (newStyle != oldStyle)
+		{
+			::SetWindowLongPtrW(m_view.m_hWnd, GWL_STYLE, newStyle);
+			::SetWindowPos(
+				m_view.m_hWnd,
+				nullptr,
+				0,
+				0,
+				0,
+				0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+		}
+
+		::ShowScrollBar(m_view.m_hWnd, SB_VERT, shouldShowScrollbar ? TRUE : FALSE);
+	}
+
+	void UpdateEditorFormattingRect() const
+	{
+		if (!m_view.m_hWnd || !::IsWindow(m_view.m_hWnd))
+		{
 			return;
 		}
 
-		HDC hdc = ::GetDC(m_view.m_hWnd);
-		if (hdc == nullptr)
-		{
-			return;
-		}
-
-		const HFONT hFont = reinterpret_cast<HFONT>(::SendMessageW(m_view.m_hWnd, WM_GETFONT, 0, 0));
-		HFONT hOldFont = nullptr;
-		if (hFont != nullptr)
-		{
-			hOldFont = reinterpret_cast<HFONT>(::SelectObject(hdc, hFont));
-		}
-
-		TEXTMETRICW tm{};
-		::GetTextMetricsW(hdc, &tm);
-		if (hOldFont != nullptr)
-		{
-			::SelectObject(hdc, hOldFont);
-		}
-		::ReleaseDC(m_view.m_hWnd, hdc);
-
-		const int lineHeight = (std::max)(1, static_cast<int>(tm.tmHeight + tm.tmExternalLeading));
-		const int visibleLines = (std::max)(1, clientHeight / lineHeight);
-		const int lineCount = static_cast<int>(::SendMessageW(m_view.m_hWnd, EM_GETLINECOUNT, 0, 0));
-		const BOOL showScrollbar = (lineCount > visibleLines) ? TRUE : FALSE;
-		::ShowScrollBar(m_view.m_hWnd, SB_VERT, showScrollbar);
+		// Keep native edit formatting area bound to full client size.
+		// Custom EM_SETRECT widths can leave a stale internal wrap boundary
+		// after window resize and look like an "inner text resize zone".
+		::SendMessageW(m_view.m_hWnd, EM_SETRECTNP, 0, 0);
 	}
 
 	bool IsFormattingEnabled() const
@@ -667,17 +783,17 @@ public:
 		switch (static_cast<WORD>(m_nLanguage))
 		{
 		case LANG_RUSSIAN:
-			return L"Р СѓСЃСЃРєРёР№";
+			return L"\u0420\u0443\u0441\u0441\u043a\u0438\u0439";
 		case LANG_GERMAN:
 			return L"Deutsch";
 		case LANG_FRENCH:
-			return L"FranГ§ais";
+			return L"Fran\u00E7ais";
 		case LANG_SPANISH:
-			return L"EspaГ±ol";
+			return L"Espa\u00F1ol";
 		case LANG_ITALIAN:
 			return L"Italiano";
 		case LANG_PORTUGUESE:
-			return L"PortuguГЄs";
+			return L"Portugu\u00EAs";
 		case LANG_DUTCH:
 			return L"Nederlands";
 		case LANG_SWEDISH:
@@ -759,8 +875,27 @@ public:
 			const BOOL useDark = m_isDarkThemeApplied ? TRUE : FALSE;
 			constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
 			constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
+			constexpr DWORD DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+			constexpr DWORD DWMWA_BORDER_COLOR = 34;
+			constexpr DWORD DWMWA_CAPTION_COLOR = 35;
+			constexpr DWORD DWMWA_TEXT_COLOR = 36;
+			constexpr DWORD DWMWA_SYSTEMBACKDROP_TYPE = 38;
+			constexpr DWORD DWMWA_MICA_EFFECT = 1029;
+			constexpr DWORD DWMSBT_NONE = 1;
+			const COLORREF captionColor = m_titleBarBackgroundColor;
+			const COLORREF borderColor = BlendColors(captionColor, m_topBarTextColor, m_isDarkThemeApplied ? 22 : 14);
+			const COLORREF textColor = m_topBarTextColor;
+			const DWORD cornerPreference = UseCustomTitleBar() ? 2U : 0U; // DWMWCP_ROUND / DWMWCP_DEFAULT
+			const DWORD backdropType = DWMSBT_NONE;
+			const BOOL micaEnabled = FALSE;
 			dwmSetWindowAttribute(m_hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDark, sizeof(useDark));
 			dwmSetWindowAttribute(m_hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, &useDark, sizeof(useDark));
+			dwmSetWindowAttribute(m_hWnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPreference, sizeof(cornerPreference));
+			dwmSetWindowAttribute(m_hWnd, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
+			dwmSetWindowAttribute(m_hWnd, DWMWA_CAPTION_COLOR, &captionColor, sizeof(captionColor));
+			dwmSetWindowAttribute(m_hWnd, DWMWA_TEXT_COLOR, &textColor, sizeof(textColor));
+			dwmSetWindowAttribute(m_hWnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdropType, sizeof(backdropType));
+			dwmSetWindowAttribute(m_hWnd, DWMWA_MICA_EFFECT, &micaEnabled, sizeof(micaEnabled));
 		}
 
 		::FreeLibrary(hDwmApi);
@@ -892,6 +1027,89 @@ public:
 	static LPCWSTR GetFindDialogOwnerPropName()
 	{
 		return L"LockNote2.FindDialogOwner";
+	}
+
+	static LPCWSTR GetChromeResizeOwnerPropName()
+	{
+		return L"LockNote2.ChromeResizeOwner";
+	}
+
+	static LPCWSTR GetChromeResizeOriginalProcPropName()
+	{
+		return L"LockNote2.ChromeResizeOriginalProc";
+	}
+
+	void AttachChromeResizeSubclass(HWND hChild)
+	{
+		if (hChild == nullptr || !::IsWindow(hChild))
+		{
+			return;
+		}
+
+		const auto currentProc = reinterpret_cast<WNDPROC>(::GetWindowLongPtrW(hChild, GWLP_WNDPROC));
+		const auto resizeProc = static_cast<WNDPROC>(&CMainFrame::ChromeResizeWindowProc);
+		if (currentProc == resizeProc)
+		{
+			::SetPropW(hChild, GetChromeResizeOwnerPropName(), reinterpret_cast<HANDLE>(this));
+			return;
+		}
+
+		::SetPropW(hChild, GetChromeResizeOwnerPropName(), reinterpret_cast<HANDLE>(this));
+		::SetPropW(hChild, GetChromeResizeOriginalProcPropName(), reinterpret_cast<HANDLE>(currentProc));
+		::SetWindowLongPtrW(hChild, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(resizeProc));
+	}
+
+	void DetachChromeResizeSubclass(HWND hChild) const
+	{
+		if (hChild == nullptr || !::IsWindow(hChild))
+		{
+			return;
+		}
+
+		const auto resizeProc = static_cast<WNDPROC>(&CMainFrame::ChromeResizeWindowProc);
+		const auto currentProc = reinterpret_cast<WNDPROC>(::GetWindowLongPtrW(hChild, GWLP_WNDPROC));
+		const auto originalProc = reinterpret_cast<WNDPROC>(::GetPropW(hChild, GetChromeResizeOriginalProcPropName()));
+		if (currentProc == resizeProc && originalProc != nullptr)
+		{
+			::SetWindowLongPtrW(hChild, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(originalProc));
+		}
+
+		::RemovePropW(hChild, GetChromeResizeOwnerPropName());
+		::RemovePropW(hChild, GetChromeResizeOriginalProcPropName());
+	}
+
+	static LRESULT CALLBACK ChromeResizeWindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+	{
+		auto* self = reinterpret_cast<CMainFrame*>(::GetPropW(hWnd, GetChromeResizeOwnerPropName()));
+		auto originalProc = reinterpret_cast<WNDPROC>(::GetPropW(hWnd, GetChromeResizeOriginalProcPropName()));
+
+		if (uMsg == WM_NCHITTEST && self != nullptr)
+		{
+			const POINT ptScreen{
+				GET_X_LPARAM(lParam),
+				GET_Y_LPARAM(lParam)
+			};
+			POINT ptClient = ptScreen;
+			::ScreenToClient(self->m_hWnd, &ptClient);
+			const int resizeHit = self->HitTestWindowResizeEdges(ptClient, false);
+			if (resizeHit != HTCLIENT)
+			{
+				// Hand edge hit-testing back to the frame so system sizing targets the top-level window.
+				return HTTRANSPARENT;
+			}
+		}
+
+		if (uMsg == WM_NCDESTROY)
+		{
+			::RemovePropW(hWnd, GetChromeResizeOwnerPropName());
+			::RemovePropW(hWnd, GetChromeResizeOriginalProcPropName());
+		}
+
+		if (originalProc != nullptr)
+		{
+			return ::CallWindowProcW(originalProc, hWnd, uMsg, wParam, lParam);
+		}
+		return ::DefWindowProcW(hWnd, uMsg, wParam, lParam);
 	}
 
 	void AttachFindDialogSubclass(HWND hFindDlg)
@@ -1687,8 +1905,15 @@ public:
 			const BOOL useDark = m_isDarkThemeApplied ? TRUE : FALSE;
 			constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
 			constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19;
+			constexpr DWORD DWMWA_SYSTEMBACKDROP_TYPE = 38;
+			constexpr DWORD DWMWA_MICA_EFFECT = 1029;
+			constexpr DWORD DWMSBT_NONE = 1;
 			dwmSetWindowAttribute(hWndTarget, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDark, sizeof(useDark));
 			dwmSetWindowAttribute(hWndTarget, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1, &useDark, sizeof(useDark));
+			const DWORD backdropType = DWMSBT_NONE;
+			dwmSetWindowAttribute(hWndTarget, DWMWA_SYSTEMBACKDROP_TYPE, &backdropType, sizeof(backdropType));
+			const BOOL micaEnabled = FALSE;
+			dwmSetWindowAttribute(hWndTarget, DWMWA_MICA_EFFECT, &micaEnabled, sizeof(micaEnabled));
 		}
 
 		::FreeLibrary(hDwmApi);
@@ -1792,12 +2017,13 @@ public:
 			m_viewTextColor = RGB(231, 231, 231);
 			m_viewBackgroundColor = RGB(32, 32, 32);
 			m_frameBackgroundColor = RGB(32, 32, 32);
-			m_topBarBackgroundColor = RGB(32, 32, 32);
+			m_titleBarBackgroundColor = RGB(24, 24, 24);
+			m_topBarBackgroundColor = RGB(24, 24, 24);
 			m_topBarTextColor = RGB(232, 232, 232);
 			m_topBarHoverColor = RGB(57, 57, 57);
 			m_topBarPressedColor = RGB(72, 72, 72);
-			m_topBarDividerColor = RGB(62, 62, 62);
-			m_toolbarBackgroundColor = RGB(32, 32, 32);
+			m_topBarDividerColor = RGB(58, 58, 58);
+			m_toolbarBackgroundColor = RGB(24, 24, 24);
 			m_toolbarHoverColor = RGB(57, 57, 57);
 			m_toolbarPressedColor = RGB(72, 72, 72);
 			m_statusBarBackgroundColor = RGB(32, 32, 32);
@@ -1815,15 +2041,16 @@ public:
 		{
 			m_viewTextColor = ::GetSysColor(COLOR_WINDOWTEXT);
 			m_viewBackgroundColor = ::GetSysColor(COLOR_WINDOW);
-			m_frameBackgroundColor = RGB(246, 246, 246);
-			m_topBarBackgroundColor = RGB(245, 247, 250);
+			m_frameBackgroundColor = RGB(245, 246, 248);
+			m_titleBarBackgroundColor = RGB(245, 246, 248);
+			m_topBarBackgroundColor = RGB(245, 246, 248);
 			m_topBarTextColor = RGB(26, 26, 26);
-			m_topBarHoverColor = RGB(225, 231, 239);
-			m_topBarPressedColor = RGB(212, 220, 231);
-			m_topBarDividerColor = RGB(207, 214, 224);
-			m_toolbarBackgroundColor = RGB(245, 247, 250);
-			m_toolbarHoverColor = RGB(221, 228, 238);
-			m_toolbarPressedColor = RGB(207, 216, 228);
+			m_topBarHoverColor = RGB(231, 233, 238);
+			m_topBarPressedColor = RGB(219, 223, 230);
+			m_topBarDividerColor = RGB(208, 212, 219);
+			m_toolbarBackgroundColor = RGB(245, 246, 248);
+			m_toolbarHoverColor = RGB(226, 230, 238);
+			m_toolbarPressedColor = RGB(214, 220, 232);
 			m_statusBarBackgroundColor = RGB(248, 249, 252);
 			m_statusBarDividerColor = RGB(216, 220, 227);
 			m_statusBarTextColor = RGB(40, 40, 40);
@@ -1942,6 +2169,116 @@ public:
 		::InvalidateRect(m_hWnd, &rc, FALSE);
 	}
 
+	void EnsureTopBarAnimationTimer()
+	{
+		if (!m_hWnd || m_topBarAnimationTimerActive)
+		{
+			return;
+		}
+
+		if (::SetTimer(m_hWnd, kTopBarAnimationTimerId, kTopBarAnimationIntervalMs, nullptr) != 0)
+		{
+			m_topBarAnimationTimerActive = true;
+		}
+	}
+
+	void StopTopBarAnimationTimer()
+	{
+		if (!m_hWnd || !m_topBarAnimationTimerActive)
+		{
+			return;
+		}
+
+		::KillTimer(m_hWnd, kTopBarAnimationTimerId);
+		m_topBarAnimationTimerActive = false;
+	}
+
+	static bool StepBlendTowardsTarget(BYTE& blendValue, const BYTE targetValue)
+	{
+		if (blendValue == targetValue)
+		{
+			return false;
+		}
+
+		const BYTE step = static_cast<BYTE>((255 * kTopBarAnimationIntervalMs) / (std::max)(static_cast<int>(kTopBarAnimationDurationMs), 1));
+		if (blendValue < targetValue)
+		{
+			const int next = (std::min)(static_cast<int>(targetValue), static_cast<int>(blendValue) + static_cast<int>(step));
+			blendValue = static_cast<BYTE>(next);
+		}
+		else
+		{
+			const int next = (std::max)(static_cast<int>(targetValue), static_cast<int>(blendValue) - static_cast<int>(step));
+			blendValue = static_cast<BYTE>(next);
+		}
+		return true;
+	}
+
+	void UpdateTopBarAnimationState()
+	{
+		const BYTE targetMenuBlend = (m_topMenuHoveredIndex >= 0 || m_topMenuPressedIndex >= 0) ? 255 : 0;
+		const BYTE targetTitleBlend = (m_titleBarHoveredButtonIndex >= 0 || m_titleBarPressedButtonIndex >= 0) ? 255 : 0;
+
+		const bool menuChanged = StepBlendTowardsTarget(m_topMenuHoverBlend, targetMenuBlend);
+		const bool titleChanged = StepBlendTowardsTarget(m_titleBarHoverBlend, targetTitleBlend);
+		if (menuChanged || titleChanged)
+		{
+			InvalidateTopBar();
+		}
+
+		const bool menuDone = (m_topMenuHoverBlend == targetMenuBlend);
+		const bool titleDone = (m_titleBarHoverBlend == targetTitleBlend);
+		if (menuDone && titleDone)
+		{
+			StopTopBarAnimationTimer();
+		}
+	}
+
+	bool UseCustomTitleBar() const
+	{
+		return true;
+	}
+
+	bool IsPointInTitleBar(const POINT& ptClient) const
+	{
+		return UseCustomTitleBar() && ptClient.y >= 0 && ptClient.y < m_nTopTitleBarHeight;
+	}
+
+	bool IsPointInMenuBar(const POINT& ptClient) const
+	{
+		if (ptClient.y < 0 || ptClient.y >= m_nTopBarHeight)
+		{
+			return false;
+		}
+		for (const RECT& rcButton : m_topMenuButtonRects)
+		{
+			if (::PtInRect(&rcButton, ptClient))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	int HitTestTitleBarButton(const POINT& ptClient) const
+	{
+		if (!IsPointInTitleBar(ptClient))
+		{
+			return -1;
+		}
+
+		for (int index = 0; index < kTitleBarButtonCount; ++index)
+		{
+			if (!::IsRectEmpty(&m_titleBarButtonRects[static_cast<size_t>(index)]) &&
+				::PtInRect(&m_titleBarButtonRects[static_cast<size_t>(index)], ptClient))
+			{
+				return index;
+			}
+		}
+
+		return -1;
+	}
+
 	HFONT GetUiFontHandle() const
 	{
 		if (m_fontUi.m_hFont != nullptr)
@@ -1960,36 +2297,66 @@ public:
 		return GetUiFontHandle();
 	}
 
+	HFONT GetTitleBarIconFontHandle() const
+	{
+		if (m_fontTitleBarIcons.m_hFont != nullptr)
+		{
+			return m_fontTitleBarIcons;
+		}
+		return GetToolbarIconFontHandle();
+	}
+
 	std::wstring GetTopBarTitleText() const
 	{
-		if (!m_hWnd)
+		return L"";
+	}
+
+	struct FontFaceProbeData
+	{
+		const wchar_t* targetFace;
+		bool found;
+	};
+
+	static int CALLBACK EnumFontFaceProbeProc(
+		const LOGFONTW* lpelfe,
+		const TEXTMETRICW* /*lpntme*/,
+		DWORD /*FontType*/,
+		LPARAM lParam)
+	{
+		auto* probe = reinterpret_cast<FontFaceProbeData*>(lParam);
+		if (probe == nullptr || lpelfe == nullptr || probe->targetFace == nullptr)
 		{
-			return L"LockNote";
+			return 0;
 		}
 
-		const int textLength = ::GetWindowTextLengthW(m_hWnd);
-		if (textLength <= 0)
+		if (_wcsicmp(lpelfe->lfFaceName, probe->targetFace) == 0)
 		{
-			return L"LockNote";
+			probe->found = true;
+			return 0;
+		}
+		return 1;
+	}
+
+	static bool IsFontFaceAvailable(const wchar_t* faceName)
+	{
+		if (faceName == nullptr || faceName[0] == L'\0')
+		{
+			return false;
 		}
 
-		std::wstring windowText(static_cast<size_t>(textLength) + 1, L'\0');
-		::GetWindowTextW(m_hWnd, windowText.data(), textLength + 1);
-		if (!windowText.empty() && windowText.back() == L'\0')
+		HDC hdcScreen = ::GetDC(nullptr);
+		if (hdcScreen == nullptr)
 		{
-			windowText.pop_back();
+			return false;
 		}
 
-		const size_t separatorPos = windowText.find(L" - ");
-		if (separatorPos != std::wstring::npos && separatorPos > 0)
-		{
-			windowText = windowText.substr(0, separatorPos);
-		}
-		if (windowText.empty())
-		{
-			windowText = L"LockNote";
-		}
-		return windowText;
+		LOGFONTW lf{};
+		lf.lfCharSet = DEFAULT_CHARSET;
+		wcsncpy_s(lf.lfFaceName, faceName, _TRUNCATE);
+		FontFaceProbeData probe{ faceName, false };
+		::EnumFontFamiliesExW(hdcScreen, &lf, EnumFontFaceProbeProc, reinterpret_cast<LPARAM>(&probe), 0);
+		::ReleaseDC(nullptr, hdcScreen);
+		return probe.found;
 	}
 
 	static COLORREF BlendColors(const COLORREF base, const COLORREF accent, const BYTE accentAlpha)
@@ -2001,9 +2368,26 @@ public:
 		return RGB(r, g, b);
 	}
 
-	static int GetCaptionButtonWidthForDpi(const int dpiX)
+	static UINT GetWindowDpiValue(HWND hWnd)
 	{
-		int captionButtonWidth = MulDiv(::GetSystemMetrics(SM_CXSIZE), dpiX, 96);
+		HMODULE hUser32 = ::GetModuleHandleW(L"user32.dll");
+		if (hUser32 != nullptr)
+		{
+			using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+			const auto getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+				::GetProcAddress(hUser32, "GetDpiForWindow"));
+			if (getDpiForWindow != nullptr && hWnd != nullptr)
+			{
+				return (std::max)(96U, getDpiForWindow(hWnd));
+			}
+		}
+
+		const SIZE systemDpi = GetSystemDpi();
+		return static_cast<UINT>((std::max)(systemDpi.cx, 96L));
+	}
+
+	static int GetSystemMetricForDpi(const int index, const UINT dpi)
+	{
 		HMODULE hUser32 = ::GetModuleHandleW(L"user32.dll");
 		if (hUser32 != nullptr)
 		{
@@ -2012,10 +2396,198 @@ public:
 				::GetProcAddress(hUser32, "GetSystemMetricsForDpi"));
 			if (getSystemMetricsForDpi != nullptr)
 			{
-				captionButtonWidth = getSystemMetricsForDpi(SM_CXSIZE, static_cast<UINT>((std::max)(dpiX, 96)));
+				return getSystemMetricsForDpi(index, (std::max)(dpi, 96U));
 			}
 		}
-		return captionButtonWidth;
+
+		return MulDiv(::GetSystemMetrics(index), static_cast<int>((std::max)(dpi, 96U)), 96);
+	}
+
+	static int GetCaptionButtonWidthForDpi(const int dpiX)
+	{
+		return GetSystemMetricForDpi(SM_CXSIZE, static_cast<UINT>((std::max)(dpiX, 96)));
+	}
+
+	static int GetResizeBorderThicknessXForDpi(const UINT dpi)
+	{
+		return GetSystemMetricForDpi(SM_CXFRAME, dpi) + GetSystemMetricForDpi(SM_CXPADDEDBORDER, dpi);
+	}
+
+	static int GetResizeBorderThicknessYForDpi(const UINT dpi)
+	{
+		return GetSystemMetricForDpi(SM_CYFRAME, dpi) + GetSystemMetricForDpi(SM_CXPADDEDBORDER, dpi);
+	}
+
+	void GetClientResizeInsetsForLayout(const int /*dpiX*/, const int /*dpiY*/, int& insetX, int& insetBottom) const
+	{
+		insetX = 0;
+		insetBottom = 0;
+		if (!UseCustomTitleBar() || !m_hWnd || ::IsZoomed(m_hWnd))
+		{
+			return;
+		}
+
+		const UINT dpiWindow = GetWindowDpiValue(m_hWnd);
+		insetX = (std::max)(
+			1,
+			GetResizeBorderThicknessXForDpi(dpiWindow));
+		insetBottom = (std::max)(
+			1,
+			GetResizeBorderThicknessYForDpi(dpiWindow));
+	}
+
+	int HitTestWindowResizeEdges(const POINT& ptClient, const bool includeTopEdge) const
+	{
+		if (!UseCustomTitleBar() || !m_hWnd || ::IsZoomed(m_hWnd))
+		{
+			return HTCLIENT;
+		}
+
+		const UINT dpi = GetWindowDpiValue(m_hWnd);
+		const int resizeBorderX = (std::max)(1, GetResizeBorderThicknessXForDpi(dpi));
+		const int resizeBorderY = (std::max)(1, GetResizeBorderThicknessYForDpi(dpi));
+		RECT rcClient{};
+		::GetClientRect(m_hWnd, &rcClient);
+
+		const bool isLeft = ptClient.x < (rcClient.left + resizeBorderX);
+		const bool isRight = ptClient.x >= (rcClient.right - resizeBorderX);
+		const bool isTop = includeTopEdge && ptClient.y < (rcClient.top + resizeBorderY);
+		const bool isBottom = ptClient.y >= (rcClient.bottom - resizeBorderY);
+
+		if (isTop && isLeft)
+		{
+			return HTTOPLEFT;
+		}
+		if (isTop && isRight)
+		{
+			return HTTOPRIGHT;
+		}
+		if (isBottom && isLeft)
+		{
+			return HTBOTTOMLEFT;
+		}
+		if (isBottom && isRight)
+		{
+			return HTBOTTOMRIGHT;
+		}
+		if (isTop)
+		{
+			return HTTOP;
+		}
+		if (isLeft)
+		{
+			return HTLEFT;
+		}
+		if (isRight)
+		{
+			return HTRIGHT;
+		}
+		if (isBottom)
+		{
+			return HTBOTTOM;
+		}
+
+		return HTCLIENT;
+	}
+
+	int GetCaptionButtonsReservedWidth(const int dpiX) const
+	{
+		return GetCaptionButtonWidthForDpi(dpiX) * kTitleBarButtonCount;
+	}
+
+	void UpdateWindowFrameStyle() const
+	{
+		if (!m_hWnd || !UseCustomTitleBar())
+		{
+			return;
+		}
+
+		const LONG_PTR currentStyle = ::GetWindowLongPtrW(m_hWnd, GWL_STYLE);
+		const LONG_PTR targetStyle =
+			(currentStyle | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN | WS_CLIPSIBLINGS) &
+			~static_cast<LONG_PTR>(WS_CAPTION);
+		if (targetStyle != currentStyle)
+		{
+			::SetWindowLongPtrW(m_hWnd, GWL_STYLE, targetStyle);
+		}
+	}
+
+	void UpdateCustomChromeFrame() const
+	{
+		using DwmExtendFrameIntoClientAreaFn = HRESULT(WINAPI*)(HWND, const void*);
+		if (!m_hWnd || !UseCustomTitleBar())
+		{
+			return;
+		}
+
+		HMODULE hDwmApi = ::LoadLibraryW(L"dwmapi.dll");
+		if (hDwmApi == nullptr)
+		{
+			return;
+		}
+
+		const auto dwmExtendFrameIntoClientArea = reinterpret_cast<DwmExtendFrameIntoClientAreaFn>(
+			::GetProcAddress(hDwmApi, "DwmExtendFrameIntoClientArea"));
+		if (dwmExtendFrameIntoClientArea != nullptr)
+		{
+			struct DwmMargins
+			{
+				int cxLeftWidth;
+				int cxRightWidth;
+				int cyTopHeight;
+				int cyBottomHeight;
+			};
+
+			const DwmMargins margins{
+				0,
+				0,
+				0,
+				0
+			};
+			dwmExtendFrameIntoClientArea(m_hWnd, &margins);
+		}
+
+		::FreeLibrary(hDwmApi);
+	}
+
+	void UpdateRoundedWindowRegion() const
+	{
+		if (!m_hWnd || !UseCustomTitleBar())
+		{
+			return;
+		}
+
+		if (::IsZoomed(m_hWnd) || ::IsIconic(m_hWnd))
+		{
+			::SetWindowRgn(m_hWnd, nullptr, TRUE);
+			return;
+		}
+
+		RECT rcWindow{};
+		if (!::GetWindowRect(m_hWnd, &rcWindow))
+		{
+			return;
+		}
+
+		const int windowWidth = rcWindow.right - rcWindow.left;
+		const int windowHeight = rcWindow.bottom - rcWindow.top;
+		if (windowWidth <= 0 || windowHeight <= 0)
+		{
+			return;
+		}
+
+		const UINT dpi = GetWindowDpiValue(m_hWnd);
+		const int cornerRadius = (std::max)(MulDiv(12, static_cast<int>(dpi), 96), 8);
+		HRGN hRoundedRegion = ::CreateRoundRectRgn(0, 0, windowWidth + 1, windowHeight + 1, cornerRadius, cornerRadius);
+		if (hRoundedRegion == nullptr)
+		{
+			return;
+		}
+
+		if (!::SetWindowRgn(m_hWnd, hRoundedRegion, TRUE))
+		{
+			::DeleteObject(hRoundedRegion);
+		}
 	}
 
 	static LPCWSTR GetUiStateRegistryPath()
@@ -2023,12 +2595,12 @@ public:
 		return L"Software\\Steganos\\LockNote2";
 	}
 
-	void LoadWindowSizeFromRegistry()
+	bool LoadWindowSizeFromRegistry()
 	{
 		CRegKey key;
 		if (key.Open(HKEY_CURRENT_USER, GetUiStateRegistryPath(), KEY_READ) != ERROR_SUCCESS)
 		{
-			return;
+			return false;
 		}
 
 		DWORD width = 0;
@@ -2036,17 +2608,18 @@ public:
 		if (key.QueryDWORDValue(L"WindowWidth", width) != ERROR_SUCCESS ||
 			key.QueryDWORDValue(L"WindowHeight", height) != ERROR_SUCCESS)
 		{
-			return;
+			return false;
 		}
 
 		if (width < static_cast<DWORD>(kStoredWindowMinWidth) ||
 			height < static_cast<DWORD>(kStoredWindowMinHeight))
 		{
-			return;
+			return false;
 		}
 
 		m_nWindowSizeX = static_cast<int>(width);
 		m_nWindowSizeY = static_cast<int>(height);
+		return true;
 	}
 
 	void SaveWindowSizeToRegistry() const
@@ -2066,6 +2639,76 @@ public:
 		key.SetDWORDValue(L"WindowHeight", static_cast<DWORD>(m_nWindowSizeY));
 	}
 
+	static SIZE GetSystemDpi()
+	{
+		SIZE dpi{ 96, 96 };
+		HDC hdcScreen = ::GetDC(nullptr);
+		if (hdcScreen != nullptr)
+		{
+			dpi.cx = (std::max)(96, GetDeviceCaps(hdcScreen, LOGPIXELSX));
+			dpi.cy = (std::max)(96, GetDeviceCaps(hdcScreen, LOGPIXELSY));
+			::ReleaseDC(nullptr, hdcScreen);
+		}
+		return dpi;
+	}
+
+	static RECT GetPreferredWorkAreaRect()
+	{
+		POINT anchorPoint{};
+		if (!::GetCursorPos(&anchorPoint))
+		{
+			anchorPoint = POINT{ 0, 0 };
+		}
+
+		HMONITOR hMonitor = ::MonitorFromPoint(anchorPoint, MONITOR_DEFAULTTONEAREST);
+		MONITORINFO monitorInfo{ sizeof(monitorInfo) };
+		if (hMonitor != nullptr && ::GetMonitorInfoW(hMonitor, &monitorInfo))
+		{
+			return monitorInfo.rcWork;
+		}
+
+		return RECT{
+			0,
+			0,
+			::GetSystemMetrics(SM_CXSCREEN),
+			::GetSystemMetrics(SM_CYSCREEN)
+		};
+	}
+
+	void ClampWindowSizeToWorkArea(const RECT& rcWork)
+	{
+		const int workWidth = (std::max)(1, static_cast<int>(rcWork.right - rcWork.left));
+		const int workHeight = (std::max)(1, static_cast<int>(rcWork.bottom - rcWork.top));
+		const int systemMinWidth = ::GetSystemMetrics(SM_CXMINTRACK);
+		const int systemMinHeight = ::GetSystemMetrics(SM_CYMINTRACK);
+		const int minWidth = (std::min)((std::max)(kStoredWindowMinWidth, systemMinWidth), workWidth);
+		const int minHeight = (std::min)((std::max)(kStoredWindowMinHeight, systemMinHeight), workHeight);
+
+		m_nWindowSizeX = (std::clamp)(m_nWindowSizeX, minWidth, workWidth);
+		m_nWindowSizeY = (std::clamp)(m_nWindowSizeY, minHeight, workHeight);
+	}
+
+	void PrepareInitialWindowSizeForCreate()
+	{
+		if (m_hasPreparedInitialWindowSize)
+		{
+			return;
+		}
+
+		m_hasLoadedPersistedWindowSize = LoadWindowSizeFromRegistry();
+		if (!m_hasLoadedPersistedWindowSize &&
+			m_nWindowSizeX == DEFAULT_WIDTH &&
+			m_nWindowSizeY == DEFAULT_HEIGHT)
+		{
+			const SIZE dpi = GetSystemDpi();
+			m_nWindowSizeX = MulDiv(m_nWindowSizeX, dpi.cx, 96);
+			m_nWindowSizeY = MulDiv(m_nWindowSizeY, dpi.cy, 96);
+		}
+
+		ClampWindowSizeToWorkArea(GetPreferredWorkAreaRect());
+		m_hasPreparedInitialWindowSize = true;
+	}
+
 	void ClampWindowSizeToCurrentWorkArea()
 	{
 		if (!m_hWnd)
@@ -2080,16 +2723,7 @@ public:
 			return;
 		}
 
-		const RECT rcWork = monitorInfo.rcWork;
-		const int workWidth = (std::max)(1, static_cast<int>(rcWork.right - rcWork.left));
-		const int workHeight = (std::max)(1, static_cast<int>(rcWork.bottom - rcWork.top));
-		const int systemMinWidth = ::GetSystemMetrics(SM_CXMINTRACK);
-		const int systemMinHeight = ::GetSystemMetrics(SM_CYMINTRACK);
-		const int minWidth = (std::min)((std::max)(kStoredWindowMinWidth, systemMinWidth), workWidth);
-		const int minHeight = (std::min)((std::max)(kStoredWindowMinHeight, systemMinHeight), workHeight);
-
-		m_nWindowSizeX = (std::clamp)(m_nWindowSizeX, minWidth, workWidth);
-		m_nWindowSizeY = (std::clamp)(m_nWindowSizeY, minHeight, workHeight);
+		ClampWindowSizeToWorkArea(monitorInfo.rcWork);
 	}
 
 	void CaptureCurrentWindowSizeIfRestored()
@@ -2131,9 +2765,22 @@ public:
 		m_topMenuCaptions.clear();
 		m_topMenuOverflowPopupPositions.clear();
 		m_topMenuOverflowCaptions.clear();
+		for (RECT& rcButton : m_titleBarButtonRects)
+		{
+			::SetRectEmpty(&rcButton);
+		}
+		m_titleBarHoveredButtonIndex = -1;
+		m_titleBarPressedButtonIndex = -1;
 		m_topMenuHoveredIndex = -1;
 		m_topMenuPressedIndex = -1;
+		m_topMenuHoverBlend = 0;
+		m_titleBarHoverBlend = 0;
+		StopTopBarAnimationTimer();
+		::SetRectEmpty(&m_topBarTitleBandRect);
+		::SetRectEmpty(&m_topBarIconRect);
 		::SetRectEmpty(&m_topBarTitleRect);
+		::SetRectEmpty(&m_topBarTabCloseRect);
+		::SetRectEmpty(&m_topBarAddButtonRect);
 		m_topBarTitleText.clear();
 
 		const HMENU hMenu = GetMainMenuHandle();
@@ -2146,12 +2793,32 @@ public:
 
 		CClientDC dc(*this);
 		const int dpiX = GetDeviceCaps(dc, LOGPIXELSX);
-		const int leftPadding = MulDiv(6, dpiX, 96);
-		const int rightPadding = MulDiv(10, dpiX, 96);
-		const int itemPaddingX = MulDiv(14, dpiX, 96);
-		const int itemSpacing = MulDiv(3, dpiX, 96);
-		const int topInset = MulDiv(7, dpiX, 96);
-		const int bottomInset = MulDiv(7, dpiX, 96);
+		if (UseCustomTitleBar())
+		{
+			const int captionButtonWidth = GetCaptionButtonWidthForDpi(dpiX);
+			int buttonRight = static_cast<int>(rcClient.right);
+			for (int buttonIndex = kTitleBarButtonCount - 1; buttonIndex >= 0; --buttonIndex)
+			{
+				const int buttonLeft = buttonRight - captionButtonWidth;
+				m_titleBarButtonRects[static_cast<size_t>(buttonIndex)] = RECT{
+					buttonLeft,
+					0,
+					buttonRight,
+					m_nTopTitleBarHeight
+				};
+				buttonRight = buttonLeft;
+			}
+
+			// Tab UI is intentionally hidden: custom frame keeps only caption buttons + menu row.
+		}
+		const int menuTop = 0;
+		const int menuBottom = UseCustomTitleBar() ? m_nTopTitleBarHeight : m_nTopMenuHeight;
+		const int leftPadding = MulDiv(16, dpiX, 96);
+		const int rightPadding = MulDiv(12, dpiX, 96);
+		const int itemPaddingX = MulDiv(12, dpiX, 96);
+		const int itemSpacing = MulDiv(8, dpiX, 96);
+		const int topInset = menuTop + MulDiv(8, dpiX, 96);
+		const int bottomInset = MulDiv(8, dpiX, 96);
 
 		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(dc, GetUiFontHandle()));
 
@@ -2162,18 +2829,36 @@ public:
 		};
 		std::vector<TopMenuEntry> entries;
 
-		const auto tryAddPrimaryItem = [&](const int pos, const std::wstring& caption)
+		const auto getPrimaryTopCaption = [&](const int pos) -> std::wstring
 		{
-			if (::GetSubMenu(hMenu, pos) != nullptr)
+			if (IsRussianUi())
 			{
-				entries.push_back(TopMenuEntry{ pos, caption });
+				switch (pos)
+				{
+				case 0:
+					return L"\u0424\u0430\u0439\u043B"; // Файл
+				case 1:
+					return L"\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C"; // Изменить
+				case 2:
+					return L"\u041F\u0440\u043E\u0441\u043C\u043E\u0442\u0440"; // Просмотр
+				case 3:
+					return L"\u0421\u043F\u0440\u0430\u0432\u043A\u0430"; // Справка
+				default:
+					break;
+				}
 			}
-		};
 
-		tryAddPrimaryItem(0, WSTR(IDS_MENU_FILE));
-		tryAddPrimaryItem(1, WSTR(IDS_MENU_EDIT));
-		tryAddPrimaryItem(2, WSTR(IDS_MENU_VIEW));
-		tryAddPrimaryItem(3, WSTR(IDS_MENU_HELP));
+			const int menuTextLength = ::GetMenuStringW(hMenu, pos, nullptr, 0, MF_BYPOSITION);
+			if (menuTextLength <= 0)
+			{
+				return L"";
+			}
+			std::wstring rawCaption;
+			rawCaption.resize(static_cast<size_t>(menuTextLength) + 1);
+			::GetMenuStringW(hMenu, pos, rawCaption.data(), menuTextLength + 1, MF_BYPOSITION);
+			rawCaption.resize(static_cast<size_t>(menuTextLength));
+			return BuildToolbarCaption(rawCaption);
+		};
 
 		const int itemCount = ::GetMenuItemCount(hMenu);
 		for (int pos = 0; pos < itemCount; ++pos)
@@ -2184,26 +2869,31 @@ public:
 				continue;
 			}
 
-			const auto existingEntry = std::find_if(
-				entries.begin(),
-				entries.end(),
-				[pos](const TopMenuEntry& entry)
+			const bool hasEncryptionItems =
+				::GetMenuState(hSubMenu, ID_STEGANOS_PASSWORD_MANAGER, MF_BYCOMMAND) != static_cast<UINT>(-1) ||
+				::GetMenuState(hSubMenu, ID_STEGANOS_SAFE, MF_BYCOMMAND) != static_cast<UINT>(-1);
+
+			std::wstring caption;
+			if (hasEncryptionItems)
+			{
+				caption = GetEncryptionMenuCaption();
+			}
+			else
+			{
+				// Keep the primary Notepad-like menu row: File/Edit/View/Help plus Encryption.
+				if (pos > 3)
 				{
-					return entry.position == pos;
-				});
-			if (existingEntry != entries.end())
+					continue;
+				}
+				caption = getPrimaryTopCaption(pos);
+			}
+
+			if (caption.empty())
 			{
 				continue;
 			}
 
-			const bool hasEncryptionItems =
-				::GetMenuState(hSubMenu, ID_STEGANOS_PASSWORD_MANAGER, MF_BYCOMMAND) != static_cast<UINT>(-1) ||
-				::GetMenuState(hSubMenu, ID_STEGANOS_SAFE, MF_BYCOMMAND) != static_cast<UINT>(-1);
-			if (hasEncryptionItems)
-			{
-				entries.push_back(TopMenuEntry{ pos, GetEncryptionMenuCaption() });
-				break;
-			}
+			entries.push_back(TopMenuEntry{ pos, caption });
 		}
 
 		struct MeasuredMenuEntry
@@ -2221,7 +2911,7 @@ public:
 			SIZE textSize{};
 			::GetTextExtentPoint32W(dc, caption.c_str(), static_cast<int>(caption.size()), &textSize);
 			const int textWidth = static_cast<int>(textSize.cx);
-			const int buttonWidth = (std::max)(textWidth + (itemPaddingX * 2), MulDiv(44, dpiX, 96));
+			const int buttonWidth = (std::max)(textWidth + (itemPaddingX * 2), MulDiv(36, dpiX, 96));
 			measuredEntries.push_back(MeasuredMenuEntry{ entry.position, caption, buttonWidth });
 		}
 
@@ -2229,12 +2919,13 @@ public:
 		SIZE overflowSize{};
 		::GetTextExtentPoint32W(dc, overflowCaption.c_str(), static_cast<int>(overflowCaption.size()), &overflowSize);
 		const int overflowTextWidth = static_cast<int>(overflowSize.cx);
-		const int overflowWidth = (std::max)(overflowTextWidth + (itemPaddingX * 2), MulDiv(44, dpiX, 96));
+		const int overflowWidth = (std::max)(overflowTextWidth + (itemPaddingX * 2), MulDiv(36, dpiX, 96));
 
-		const int captionButtonWidth = GetCaptionButtonWidthForDpi(dpiX);
-		const int reservedWindowButtonsWidth = (captionButtonWidth * 3) + MulDiv(4, dpiX, 96);
-
-		int menuRight = static_cast<int>(rcClient.right) - rightPadding - reservedWindowButtonsWidth;
+		int menuRight = static_cast<int>(rcClient.right) - rightPadding;
+		if (UseCustomTitleBar())
+		{
+			menuRight -= GetCaptionButtonsReservedWidth(dpiX) + MulDiv(8, dpiX, 96);
+		}
 		menuRight = (std::max)(menuRight, leftPadding);
 
 		const int availableWidth = menuRight - leftPadding;
@@ -2296,7 +2987,7 @@ public:
 					x,
 					topInset,
 					x + measuredEntry.width,
-					m_nTopBarHeight - bottomInset
+					menuBottom - bottomInset
 				};
 				m_topMenuPopupPositions.push_back(measuredEntry.position);
 				m_topMenuButtonRects.push_back(buttonRect);
@@ -2310,7 +3001,7 @@ public:
 					x,
 					topInset,
 					x + overflowWidth,
-					m_nTopBarHeight - bottomInset
+					menuBottom - bottomInset
 				};
 				m_topMenuPopupPositions.push_back(kTopMenuOverflowMarker);
 				m_topMenuButtonRects.push_back(overflowRect);
@@ -2325,6 +3016,7 @@ public:
 		}
 
 		::SelectObject(dc, hOldFont);
+		RefreshToolbarLayout();
 	}
 
 	static std::wstring BuildToolbarCaption(const std::wstring& sourceText)
@@ -2365,6 +3057,127 @@ public:
 			hWndChild == m_hFindPanelReplaceButton ||
 			hWndChild == m_hFindPanelReplaceAllButton ||
 			hWndChild == m_hFindPanelSearchIcon;
+	}
+
+	static LRESULT CALLBACK FindPanelButtonSubclassProc(
+		HWND hWnd,
+		UINT uMsg,
+		WPARAM wParam,
+		LPARAM lParam,
+		UINT_PTR /*uIdSubclass*/,
+		DWORD_PTR dwRefData)
+	{
+		auto* self = reinterpret_cast<CMainFrame*>(dwRefData);
+		if (self != nullptr)
+		{
+			switch (uMsg)
+			{
+			case WM_MOUSEMOVE:
+			{
+				self->UpdateHotFindPanelButton(hWnd);
+				TRACKMOUSEEVENT tme{ sizeof(tme) };
+				tme.dwFlags = TME_LEAVE;
+				tme.hwndTrack = hWnd;
+				::TrackMouseEvent(&tme);
+				break;
+			}
+			case WM_MOUSELEAVE:
+				if (self->m_hHotFindPanelButton == hWnd)
+				{
+					self->UpdateHotFindPanelButton(nullptr);
+				}
+				break;
+			case WM_NCDESTROY:
+				if (self->m_hHotFindPanelButton == hWnd)
+				{
+					self->m_hHotFindPanelButton = nullptr;
+				}
+				::RemoveWindowSubclass(hWnd, FindPanelButtonSubclassProc, 0);
+				break;
+			default:
+				break;
+			}
+		}
+
+		return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
+	}
+
+	void UpdateHotFindPanelButton(HWND hWndHot)
+	{
+		if (hWndHot != nullptr && !::IsWindow(hWndHot))
+		{
+			hWndHot = nullptr;
+		}
+
+		if (m_hHotFindPanelButton == hWndHot)
+		{
+			return;
+		}
+
+		const HWND hOldHot = m_hHotFindPanelButton;
+		m_hHotFindPanelButton = hWndHot;
+		if (hOldHot != nullptr && ::IsWindow(hOldHot))
+		{
+			::InvalidateRect(hOldHot, nullptr, TRUE);
+		}
+		if (m_hHotFindPanelButton != nullptr && ::IsWindow(m_hHotFindPanelButton))
+		{
+			::InvalidateRect(m_hHotFindPanelButton, nullptr, TRUE);
+		}
+	}
+
+	void SubclassFindPanelButton(HWND hWndButton)
+	{
+		if (hWndButton == nullptr || !::IsWindow(hWndButton))
+		{
+			return;
+		}
+
+		::SetWindowSubclass(
+			hWndButton,
+			FindPanelButtonSubclassProc,
+			0,
+			reinterpret_cast<DWORD_PTR>(this));
+	}
+
+	void AttachChromeResizeSubclassesForFindPanelControls()
+	{
+		const std::array<HWND, 10> findControls{
+			m_hFindPanelToggleButton,
+			m_hFindPanelFindEdit,
+			m_hFindPanelFindNextButton,
+			m_hFindPanelFindPrevButton,
+			m_hFindPanelOptionsButton,
+			m_hFindPanelCloseButton,
+			m_hFindPanelReplaceEdit,
+			m_hFindPanelReplaceButton,
+			m_hFindPanelReplaceAllButton,
+			m_hFindPanelSearchIcon
+		};
+		for (const HWND hWndControl : findControls)
+		{
+			AttachChromeResizeSubclass(hWndControl);
+		}
+	}
+
+	void DetachChromeResizeSubclassesForFindPanelControls() const
+	{
+		const std::array<HWND, 10> findControls{
+			m_hFindPanelToggleButton,
+			m_hFindPanelFindEdit,
+			m_hFindPanelFindNextButton,
+			m_hFindPanelFindPrevButton,
+			m_hFindPanelOptionsButton,
+			m_hFindPanelCloseButton,
+			m_hFindPanelReplaceEdit,
+			m_hFindPanelReplaceButton,
+			m_hFindPanelReplaceAllButton,
+			m_hFindPanelSearchIcon
+		};
+		for (const HWND hWndControl : findControls)
+		{
+			DetachChromeResizeSubclass(hWndControl);
+		}
 	}
 
 	void EnsureFindPanelControlsCreated()
@@ -2508,6 +3321,21 @@ public:
 			nullptr,
 			_Module.GetModuleInstance(),
 			nullptr);
+
+		const std::array<HWND, 7> findButtons{
+			m_hFindPanelToggleButton,
+			m_hFindPanelFindNextButton,
+			m_hFindPanelFindPrevButton,
+			m_hFindPanelOptionsButton,
+			m_hFindPanelCloseButton,
+			m_hFindPanelReplaceButton,
+			m_hFindPanelReplaceAllButton
+		};
+		for (const HWND hWndButton : findButtons)
+		{
+			SubclassFindPanelButton(hWndButton);
+		}
+		AttachChromeResizeSubclassesForFindPanelControls();
 	}
 
 	void ApplyFindPanelFontsAndTexts()
@@ -2649,6 +3477,11 @@ public:
 		setVisible(m_hFindPanelReplaceButton, showReplaceRow);
 		setVisible(m_hFindPanelReplaceAllButton, showReplaceRow);
 
+		if (m_hHotFindPanelButton != nullptr && !::IsWindowVisible(m_hHotFindPanelButton))
+		{
+			UpdateHotFindPanelButton(nullptr);
+		}
+
 		ApplyFindPanelFontsAndTexts();
 		UpdateFindPanelButtonsEnabledState();
 	}
@@ -2670,6 +3503,18 @@ public:
 	void LayoutFindPanelControls(const RECT& rcClient, const int dpiX, const int dpiY)
 	{
 		const RECT previousPanelRect = m_findPanelRect;
+		RECT previousAreaRect{};
+		if (!::IsRectEmpty(&previousPanelRect))
+		{
+			const int previousAreaBottom = previousPanelRect.bottom + MulDiv(4, dpiY, 96);
+			previousAreaRect = RECT{
+				rcClient.left,
+				m_nTopBarHeight,
+				rcClient.right,
+				(std::max)(m_nTopBarHeight, previousAreaBottom)
+			};
+		}
+
 		UpdateFindPanelVisibility();
 		if (!m_isFindPanelVisible)
 		{
@@ -2677,9 +3522,9 @@ public:
 			::SetRectEmpty(&m_findPanelFindEditFrameRect);
 			::SetRectEmpty(&m_findPanelReplaceEditFrameRect);
 			::SetRectEmpty(&m_findPanelSearchIconRect);
-			if (!::IsRectEmpty(&previousPanelRect))
+			if (!::IsRectEmpty(&previousAreaRect))
 			{
-				::InvalidateRect(m_hWnd, &previousPanelRect, TRUE);
+				::InvalidateRect(m_hWnd, &previousAreaRect, TRUE);
 			}
 			return;
 		}
@@ -2801,14 +3646,16 @@ public:
 		}
 
 		UpdateFindPanelButtonsEnabledState();
-		RECT invalidateRect{};
-		if (::IsRectEmpty(&previousPanelRect))
+		const RECT currentAreaRect{
+			rcClient.left,
+			m_nTopBarHeight,
+			rcClient.right,
+			m_nTopBarHeight + areaHeight
+		};
+		RECT invalidateRect = currentAreaRect;
+		if (!::IsRectEmpty(&previousAreaRect))
 		{
-			invalidateRect = m_findPanelRect;
-		}
-		else
-		{
-			::UnionRect(&invalidateRect, &previousPanelRect, &m_findPanelRect);
+			::UnionRect(&invalidateRect, &previousAreaRect, &currentAreaRect);
 		}
 		::InvalidateRect(m_hWnd, &invalidateRect, TRUE);
 	}
@@ -2822,6 +3669,8 @@ public:
 
 		RECT rcClient{};
 		::GetClientRect(m_hWnd, &rcClient);
+		const int clientWidth = static_cast<int>(rcClient.right - rcClient.left);
+		const int clientHeight = static_cast<int>(rcClient.bottom - rcClient.top);
 		CClientDC dc(*this);
 		const int dpiX = GetDeviceCaps(dc, LOGPIXELSX);
 		const int dpiY = GetDeviceCaps(dc, LOGPIXELSY);
@@ -2829,11 +3678,39 @@ public:
 		int statusHeight = 0;
 		if (m_hWndStatusBar)
 		{
-			NormalizeStatusBarStyles();
-			::ShowWindow(m_hWndStatusBar, m_isStatusBarVisible ? SW_SHOWNOACTIVATE : SW_HIDE);
+			const bool isVisible = ::IsWindowVisible(m_hWndStatusBar) != FALSE;
+			if (m_isStatusBarVisible && !isVisible)
+			{
+				::ShowWindow(m_hWndStatusBar, SW_SHOWNOACTIVATE);
+			}
+			else if (!m_isStatusBarVisible && isVisible)
+			{
+				::ShowWindow(m_hWndStatusBar, SW_HIDE);
+			}
 			if (m_isStatusBarVisible)
 			{
 				::SendMessage(m_hWndStatusBar, WM_SIZE, 0, 0);
+				RECT rcStatus{};
+				::GetWindowRect(m_hWndStatusBar, &rcStatus);
+				::MapWindowPoints(nullptr, m_hWnd, reinterpret_cast<LPPOINT>(&rcStatus), 2);
+				statusHeight = rcStatus.bottom - rcStatus.top;
+				if (statusHeight <= 0)
+				{
+					statusHeight = MulDiv(24, dpiY, 96);
+				}
+
+				const int statusLeft = 0;
+				const int statusWidth = (std::max)(0, clientWidth);
+				const int statusTop = (std::max)(0, clientHeight - statusHeight);
+				::SetWindowPos(
+					m_hWndStatusBar,
+					nullptr,
+					statusLeft,
+					statusTop,
+					statusWidth,
+					statusHeight,
+					SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+
 				RECT rcStatusClient{};
 				::GetClientRect(m_hWndStatusBar, &rcStatusClient);
 				if (rcStatusClient.right > 0)
@@ -2856,21 +3733,35 @@ public:
 					};
 					::SendMessageW(m_hWndStatusBar, SB_SETPARTS, kStatusBarParts, reinterpret_cast<LPARAM>(rightEdges));
 				}
-				RECT rcStatus{};
-				::GetWindowRect(m_hWndStatusBar, &rcStatus);
-				::MapWindowPoints(nullptr, m_hWnd, reinterpret_cast<LPPOINT>(&rcStatus), 2);
-				statusHeight = rcStatus.bottom - rcStatus.top;
 			}
 		}
 
-		const int findPanelHeight = GetFindPanelAreaHeightForDpi(dpiY);
 		LayoutFindPanelControls(rcClient, dpiX, dpiY);
-		const int editTop = m_nTopBarHeight + findPanelHeight;
-		const int editHeight = (rcClient.bottom - rcClient.top) - editTop - statusHeight;
-		::MoveWindow(m_view, 0, editTop, rcClient.right - rcClient.left, (std::max)(0, editHeight), TRUE);
+		const int editTop = m_nTopBarHeight;
+		const int editLeft = 0;
+		const int editRight = clientWidth;
+		const int editBottom = clientHeight - statusHeight;
+		const int editWidth = (std::max)(0, editRight - editLeft);
+		const int editHeight = (std::max)(0, editBottom - editTop);
+		::MoveWindow(m_view, editLeft, editTop, editWidth, editHeight, FALSE);
+		UpdateEditorFormattingRect();
+		UpdateViewClipRegionForFindPanel(RECT{});
 		RefreshToolbarLayout();
 		RefreshTopMenuLayout();
 		InvalidateTopBar();
+	}
+
+	void UpdateViewClipRegionForFindPanel(const RECT& /*rcViewInClient*/) const
+	{
+		if (m_view.m_hWnd == nullptr || !::IsWindow(m_view.m_hWnd))
+		{
+			return;
+		}
+
+		// Keep the editor region rectangular; non-rectangular clipping causes
+		// incorrect internal wrap width in multiline edit controls.
+		::SetWindowRgn(m_view.m_hWnd, nullptr, TRUE);
+		::InvalidateRect(m_view.m_hWnd, nullptr, FALSE);
 	}
 
 	bool IsFindPanelButtonControlId(const UINT controlId) const
@@ -2994,7 +3885,9 @@ public:
 
 		const bool isDisabled = (pDrawItem->itemState & ODS_DISABLED) != 0;
 		const bool isPressed = (pDrawItem->itemState & ODS_SELECTED) != 0;
-		const bool isHot = (pDrawItem->itemState & ODS_HOTLIGHT) != 0;
+		const bool isHot =
+			(pDrawItem->itemState & ODS_HOTLIGHT) != 0 ||
+			pDrawItem->hwndItem == m_hHotFindPanelButton;
 		const bool isIconButton =
 			pDrawItem->CtlID != kFindPanelReplaceButtonId &&
 			pDrawItem->CtlID != kFindPanelReplaceAllButtonId;
@@ -3110,11 +4003,6 @@ public:
 
 	int HitTestTopMenuButton(const POINT ptClient) const
 	{
-		if (ptClient.y < 0 || ptClient.y >= m_nTopMenuHeight)
-		{
-			return -1;
-		}
-
 		for (size_t i = 0; i < m_topMenuButtonRects.size(); ++i)
 		{
 			if (::PtInRect(&m_topMenuButtonRects[i], ptClient))
@@ -3270,6 +4158,107 @@ public:
 		OpenTopMenuPopupByPosition(menuPos, m_topMenuButtonRects[static_cast<size_t>(buttonIndex)], buttonIndex);
 	}
 
+	void ShowCommandPalette()
+	{
+		if (!m_hWnd)
+		{
+			return;
+		}
+
+		ApplyPopupMenuTheme();
+		CMenu paletteMenu;
+		if (!paletteMenu.CreatePopupMenu())
+		{
+			return;
+		}
+
+		const bool isRu = IsRussianUi();
+		::AppendMenuW(paletteMenu, MF_STRING, ID_FILE_SAVE, isRu ? L"\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C\tCtrl+S" : L"Save\tCtrl+S");
+		::AppendMenuW(paletteMenu, MF_STRING, ID_FILE_SAVE_AS, isRu ? L"\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043A\u0430\u043A..." : L"Save As...");
+		::AppendMenuW(paletteMenu, MF_SEPARATOR, 0, nullptr);
+		::AppendMenuW(paletteMenu, MF_STRING, ID_EDIT_FIND, isRu ? L"\u041D\u0430\u0439\u0442\u0438...\tCtrl+F" : L"Find...\tCtrl+F");
+		::AppendMenuW(paletteMenu, MF_STRING, ID_EDIT_FINDNEXT, isRu ? L"\u041D\u0430\u0439\u0442\u0438 \u0434\u0430\u043B\u0435\u0435\tF3" : L"Find Next\tF3");
+		::AppendMenuW(paletteMenu, MF_STRING, ID_EDIT_SELECT_ALL, isRu ? L"\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u044C \u0432\u0441\u0435\tCtrl+A" : L"Select All\tCtrl+A");
+		::AppendMenuW(paletteMenu, MF_SEPARATOR, 0, nullptr);
+		::AppendMenuW(paletteMenu, MF_STRING, ID_STEGANOS_PASSWORD_MANAGER, isRu ? L"\u0428\u0438\u0444\u0440\u043E\u0432\u0430\u043D\u0438\u0435: \u041C\u0435\u043D\u0435\u0434\u0436\u0435\u0440 \u043F\u0430\u0440\u043E\u043B\u0435\u0439" : L"Encryption: Password Manager");
+		::AppendMenuW(paletteMenu, MF_STRING, ID_STEGANOS_SAFE, isRu ? L"\u0428\u0438\u0444\u0440\u043E\u0432\u0430\u043D\u0438\u0435: Safe" : L"Encryption: Safe");
+		::AppendMenuW(paletteMenu, MF_SEPARATOR, 0, nullptr);
+		::AppendMenuW(paletteMenu, MF_STRING, ID_THEME_SYSTEM, isRu ? L"\u0422\u0435\u043C\u0430: \u0421\u0438\u0441\u0442\u0435\u043C\u043D\u0430\u044F" : L"Theme: System");
+		::AppendMenuW(paletteMenu, MF_STRING, ID_THEME_LIGHT, isRu ? L"\u0422\u0435\u043C\u0430: \u0421\u0432\u0435\u0442\u043B\u0430\u044F" : L"Theme: Light");
+		::AppendMenuW(paletteMenu, MF_STRING, ID_THEME_DARK, isRu ? L"\u0422\u0435\u043C\u0430: \u0422\u0435\u043C\u043D\u0430\u044F" : L"Theme: Dark");
+		::AppendMenuW(paletteMenu, MF_SEPARATOR, 0, nullptr);
+		::AppendMenuW(paletteMenu, MF_STRING, ID_APP_ABOUT, isRu ? L"\u041E \u043F\u0440\u043E\u0433\u0440\u0430\u043C\u043C\u0435" : L"About");
+
+		RECT rcClient{};
+		::GetClientRect(m_hWnd, &rcClient);
+		CClientDC dc(*this);
+		const int dpiX = (std::max)(GetDeviceCaps(dc, LOGPIXELSX), 96);
+		const int clientWidth = static_cast<int>(rcClient.right - rcClient.left);
+		POINT popupOrigin{
+			(std::max)(0, (clientWidth / 2) - MulDiv(120, dpiX, 96)),
+			m_nTopBarHeight + MulDiv(8, dpiX, 96)
+		};
+		::ClientToScreen(m_hWnd, &popupOrigin);
+
+		const UINT commandId = ::TrackPopupMenuEx(
+			paletteMenu,
+			TPM_LEFTALIGN | TPM_TOPALIGN | TPM_LEFTBUTTON | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+			popupOrigin.x,
+			popupOrigin.y,
+			m_hWnd,
+			nullptr);
+		if (commandId != 0)
+		{
+			::PostMessageW(m_hWnd, WM_COMMAND, MAKEWPARAM(commandId, 0), 0);
+		}
+	}
+
+	bool HandleTopBarRightClick(const POINT& ptClient)
+	{
+		if (!UseCustomTitleBar())
+		{
+			return false;
+		}
+		if (ptClient.y < 0 || ptClient.y >= m_nTopBarHeight)
+		{
+			return false;
+		}
+
+		const int menuIndex = HitTestTopMenuButton(ptClient);
+		if (menuIndex >= 0)
+		{
+			OpenTopMenuAtIndex(menuIndex);
+			return true;
+		}
+
+		if (!IsPointInTitleBar(ptClient) && !IsPointInMenuBar(ptClient))
+		{
+			return false;
+		}
+
+		POINT ptScreen = ptClient;
+		::ClientToScreen(m_hWnd, &ptScreen);
+		HMENU hSystemMenu = ::GetSystemMenu(m_hWnd, FALSE);
+		if (hSystemMenu == nullptr)
+		{
+			return true;
+		}
+
+		const UINT command = static_cast<UINT>(::TrackPopupMenu(
+			hSystemMenu,
+			TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+			ptScreen.x,
+			ptScreen.y,
+			0,
+			m_hWnd,
+			nullptr));
+		if (command != 0U)
+		{
+			::PostMessageW(m_hWnd, WM_SYSCOMMAND, command, 0);
+		}
+		return true;
+	}
+
 	void ExecuteToolbarCommand(const int buttonIndex)
 	{
 		if (buttonIndex < 0 || buttonIndex >= static_cast<int>(m_toolbarCommandIds.size()))
@@ -3288,78 +4277,191 @@ public:
 		InvalidateTopBar();
 	}
 
+	void ExecuteTitleBarButtonCommand(const int buttonIndex)
+	{
+		UINT systemCommand = 0;
+		switch (buttonIndex)
+		{
+		case kTitleBarButtonMinimize:
+			systemCommand = SC_MINIMIZE;
+			break;
+		case kTitleBarButtonMaximize:
+			systemCommand = ::IsZoomed(m_hWnd) ? SC_RESTORE : SC_MAXIMIZE;
+			break;
+		case kTitleBarButtonClose:
+			systemCommand = SC_CLOSE;
+			break;
+		default:
+			return;
+		}
+
+		::PostMessageW(m_hWnd, WM_SYSCOMMAND, systemCommand, 0);
+	}
+
+	COLORREF GetTitleBarButtonFillColor(const int buttonIndex) const
+	{
+		const bool isHovered = buttonIndex == m_titleBarHoveredButtonIndex;
+		const bool isPressed = buttonIndex == m_titleBarPressedButtonIndex;
+		if (buttonIndex == kTitleBarButtonClose)
+		{
+			if (isPressed)
+			{
+				return m_isDarkThemeApplied ? RGB(168, 42, 32) : RGB(196, 58, 46);
+			}
+			if (isHovered)
+			{
+				return BlendColors(
+					m_titleBarBackgroundColor,
+					RGB(196, 43, 28),
+					static_cast<BYTE>(MulDiv(255, m_titleBarHoverBlend, 255)));
+			}
+			return m_titleBarBackgroundColor;
+		}
+
+		if (isPressed)
+		{
+			return BlendColors(m_titleBarBackgroundColor, m_topBarTextColor, m_isDarkThemeApplied ? 48 : 30);
+		}
+		if (isHovered)
+		{
+			const BYTE hoverBlend = static_cast<BYTE>(MulDiv(m_isDarkThemeApplied ? 28 : 18, m_titleBarHoverBlend, 255));
+			return BlendColors(m_titleBarBackgroundColor, m_topBarTextColor, hoverBlend);
+		}
+		return m_titleBarBackgroundColor;
+	}
+
+	COLORREF GetTitleBarButtonGlyphColor(const int buttonIndex) const
+	{
+		if (buttonIndex == kTitleBarButtonClose &&
+			(buttonIndex == m_titleBarHoveredButtonIndex || buttonIndex == m_titleBarPressedButtonIndex))
+		{
+			return RGB(255, 255, 255);
+		}
+		return m_topBarTextColor;
+	}
+
+	void DrawTitleBarButtonGlyph(HDC hdc, const int buttonIndex, const RECT& rcButton) const
+	{
+		if (::IsRectEmpty(&rcButton))
+		{
+			return;
+		}
+
+		const wchar_t* glyph = L"";
+		switch (buttonIndex)
+		{
+		case kTitleBarButtonMinimize:
+			glyph = L"\xE921";
+			break;
+		case kTitleBarButtonMaximize:
+			glyph = (::IsZoomed(m_hWnd) != FALSE) ? L"\xE923" : L"\xE922";
+			break;
+		case kTitleBarButtonClose:
+			glyph = L"\xE8BB";
+			break;
+		default:
+			return;
+		}
+
+		const HGDIOBJ oldFont = ::SelectObject(hdc, GetTitleBarIconFontHandle());
+		::SetBkMode(hdc, TRANSPARENT);
+		::SetTextColor(hdc, GetTitleBarButtonGlyphColor(buttonIndex));
+		RECT rcGlyph = rcButton;
+		::DrawTextW(hdc, glyph, 1, &rcGlyph, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX);
+		::SelectObject(hdc, oldFont);
+	}
+
 	void DrawTopBar(HDC hdc)
 	{
 		RECT rcClient{};
 		::GetClientRect(m_hWnd, &rcClient);
-		RECT rcTopBar{ 0, 0, rcClient.right, m_nTopBarHeight };
-		CBrush topBarBrush;
-		topBarBrush.CreateSolidBrush(m_topBarBackgroundColor);
-		::FillRect(hdc, &rcTopBar, topBarBrush);
+
+		if (UseCustomTitleBar())
+		{
+			RECT rcTitleBar{ 0, 0, rcClient.right, m_nTopBarHeight };
+			CBrush titleBarBrush;
+			titleBarBrush.CreateSolidBrush(m_titleBarBackgroundColor);
+			::FillRect(hdc, &rcTitleBar, titleBarBrush);
+		}
+		else
+		{
+			RECT rcMenuBar{ 0, 0, rcClient.right, m_nTopMenuHeight };
+			CBrush menuBarBrush;
+			menuBarBrush.CreateSolidBrush(m_topBarBackgroundColor);
+			::FillRect(hdc, &rcMenuBar, menuBarBrush);
+		}
 
 		HFONT hOldBaseFont = reinterpret_cast<HFONT>(::SelectObject(hdc, GetUiFontHandle()));
 		::SetBkMode(hdc, TRANSPARENT);
-		const int dpiX = GetDeviceCaps(hdc, LOGPIXELSX);
-		const int menuHighlightRadius = (std::max)(MulDiv(7, dpiX, 96), 4);
-		const int menuHighlightInsetY = (std::max)(MulDiv(1, dpiX, 96), 1);
 
-		const auto drawRoundedMenuHighlight = [&](const RECT& rcButton, const COLORREF fillColor)
+		if (UseCustomTitleBar() && !::IsRectEmpty(&m_topBarTitleRect))
 		{
-			RECT rcHighlight = rcButton;
-			rcHighlight.top += menuHighlightInsetY;
-			rcHighlight.bottom -= menuHighlightInsetY;
-			if ((rcHighlight.right - rcHighlight.left) < 2 || (rcHighlight.bottom - rcHighlight.top) < 2)
+			const int dpiX = (std::max)(GetDeviceCaps(hdc, LOGPIXELSX), 96);
+			if (!::IsRectEmpty(&m_topBarTitleBandRect))
 			{
-				return;
+				CBrush tabBrush;
+				tabBrush.CreateSolidBrush(BlendColors(m_topBarBackgroundColor, RGB(19, 21, 34), 206));
+				CPen tabBorderPen;
+				tabBorderPen.CreatePen(PS_SOLID, 1, BlendColors(m_topBarBackgroundColor, m_topBarTextColor, 26));
+				const HGDIOBJ oldBrush = ::SelectObject(hdc, tabBrush);
+				const HGDIOBJ oldPen = ::SelectObject(hdc, tabBorderPen);
+				const int tabRadius = (std::max)(MulDiv(13, dpiX, 96), 9);
+				::RoundRect(
+					hdc,
+					m_topBarTitleBandRect.left,
+					m_topBarTitleBandRect.top,
+					m_topBarTitleBandRect.right,
+					m_topBarTitleBandRect.bottom,
+					tabRadius,
+					tabRadius);
+				::SelectObject(hdc, oldPen);
+				::SelectObject(hdc, oldBrush);
+
+				const int indicatorSize = (std::max)(MulDiv(8, dpiX, 96), 6);
+				const int indicatorX = m_topBarTitleBandRect.right - MulDiv(22, dpiX, 96);
+				const int indicatorY = m_topBarTitleBandRect.top + ((m_topBarTitleBandRect.bottom - m_topBarTitleBandRect.top - indicatorSize) / 2);
+				RECT rcIndicator{ indicatorX, indicatorY, indicatorX + indicatorSize, indicatorY + indicatorSize };
+				CBrush indicatorBrush;
+				indicatorBrush.CreateSolidBrush(RGB(150, 150, 160));
+				CPen indicatorPen;
+				indicatorPen.CreatePen(PS_SOLID, 1, RGB(150, 150, 160));
+				const HGDIOBJ oldIndicatorBrush = ::SelectObject(hdc, indicatorBrush);
+				const HGDIOBJ oldIndicatorPen = ::SelectObject(hdc, indicatorPen);
+				::Ellipse(hdc, rcIndicator.left, rcIndicator.top, rcIndicator.right, rcIndicator.bottom);
+				::SelectObject(hdc, oldIndicatorPen);
+				::SelectObject(hdc, oldIndicatorBrush);
 			}
 
-			HBRUSH hFillBrush = ::CreateSolidBrush(fillColor);
-			HPEN hBorderPen = ::CreatePen(
-				PS_SOLID,
-				1,
-				BlendColors(fillColor, m_topBarDividerColor, m_isDarkThemeApplied ? 120 : 96));
-			if (hFillBrush == nullptr)
-			{
-				if (hBorderPen != nullptr)
-				{
-					::DeleteObject(hBorderPen);
-				}
-				return;
-			}
-
-			HGDIOBJ hOldBrush = ::SelectObject(hdc, hFillBrush);
-			HGDIOBJ hOldPen = ::SelectObject(hdc, (hBorderPen != nullptr) ? hBorderPen : ::GetStockObject(NULL_PEN));
-			::RoundRect(
-				hdc,
-				rcHighlight.left,
-				rcHighlight.top,
-				rcHighlight.right,
-				rcHighlight.bottom,
-				menuHighlightRadius,
-				menuHighlightRadius);
-
-			if (hOldPen != nullptr)
-			{
-				::SelectObject(hdc, hOldPen);
-			}
-			if (hOldBrush != nullptr)
-			{
-				::SelectObject(hdc, hOldBrush);
-			}
-			::DeleteObject(hFillBrush);
-			if (hBorderPen != nullptr)
-			{
-				::DeleteObject(hBorderPen);
-			}
-		};
-
-		if (!::IsRectEmpty(&m_topBarTitleRect))
-		{
 			RECT rcTitleText = m_topBarTitleRect;
-			rcTitleText.left += MulDiv(10, dpiX, 96);
-			rcTitleText.right -= MulDiv(8, dpiX, 96);
 			::SetTextColor(hdc, m_topBarTextColor);
-			::DrawTextW(hdc, m_topBarTitleText.c_str(), -1, &rcTitleText, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+			::DrawTextW(
+				hdc,
+				m_topBarTitleText.c_str(),
+				-1,
+				&rcTitleText,
+				DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS | DT_NOPREFIX);
+		}
+
+		if (UseCustomTitleBar())
+		{
+			for (int buttonIndex = 0; buttonIndex < kTitleBarButtonCount; ++buttonIndex)
+			{
+				const RECT& rcButton = m_titleBarButtonRects[static_cast<size_t>(buttonIndex)];
+				if (::IsRectEmpty(&rcButton))
+				{
+					continue;
+				}
+
+				const COLORREF fillColor = GetTitleBarButtonFillColor(buttonIndex);
+				if (fillColor != m_titleBarBackgroundColor)
+				{
+					CBrush buttonBrush;
+					buttonBrush.CreateSolidBrush(fillColor);
+					::FillRect(hdc, &rcButton, buttonBrush);
+				}
+
+				DrawTitleBarButtonGlyph(hdc, buttonIndex, rcButton);
+			}
 		}
 
 		for (size_t i = 0; i < m_topMenuButtonRects.size(); ++i)
@@ -3369,22 +4471,45 @@ public:
 
 			if (static_cast<int>(i) == m_topMenuPressedIndex)
 			{
-				drawRoundedMenuHighlight(rcButton, m_topBarPressedColor);
+				CBrush pressedBrush;
+				pressedBrush.CreateSolidBrush(m_topBarPressedColor);
+				CPen pressedPen;
+				pressedPen.CreatePen(PS_SOLID, 1, BlendColors(m_topBarPressedColor, m_topBarDividerColor, 96));
+				const HGDIOBJ oldBrush = ::SelectObject(hdc, pressedBrush);
+				const HGDIOBJ oldPen = ::SelectObject(hdc, pressedPen);
+				const int radius = (std::max)(MulDiv(8, GetDeviceCaps(hdc, LOGPIXELSX), 96), 5);
+				::RoundRect(hdc, rcButton.left, rcButton.top, rcButton.right, rcButton.bottom, radius, radius);
+				::SelectObject(hdc, oldPen);
+				::SelectObject(hdc, oldBrush);
 			}
 			else if (static_cast<int>(i) == m_topMenuHoveredIndex)
 			{
-				drawRoundedMenuHighlight(rcButton, m_topBarHoverColor);
+				const COLORREF hoverFill = BlendColors(m_topBarBackgroundColor, m_topBarHoverColor, m_topMenuHoverBlend);
+				CBrush hoverBrush;
+				hoverBrush.CreateSolidBrush(hoverFill);
+				CPen hoverPen;
+				hoverPen.CreatePen(PS_SOLID, 1, BlendColors(hoverFill, m_topBarDividerColor, 96));
+				const HGDIOBJ oldBrush = ::SelectObject(hdc, hoverBrush);
+				const HGDIOBJ oldPen = ::SelectObject(hdc, hoverPen);
+				const int radius = (std::max)(MulDiv(8, GetDeviceCaps(hdc, LOGPIXELSX), 96), 5);
+				::RoundRect(hdc, rcButton.left, rcButton.top, rcButton.right, rcButton.bottom, radius, radius);
+				::SelectObject(hdc, oldPen);
+				::SelectObject(hdc, oldBrush);
 			}
 
 			::SetTextColor(hdc, m_topBarTextColor);
-			RECT rcText = rcButton;
-			::DrawTextW(hdc, caption.c_str(), static_cast<int>(caption.size()), &rcText, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_HIDEPREFIX);
+			::DrawTextW(
+				hdc,
+				caption.c_str(),
+				static_cast<int>(caption.size()),
+				&rcButton,
+				DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_HIDEPREFIX | DT_END_ELLIPSIS);
 		}
 
 		HFONT hOldToolbarFont = nullptr;
 		if (!m_toolbarButtonRects.empty())
 		{
-			hOldToolbarFont = reinterpret_cast<HFONT>(::SelectObject(hdc, GetToolbarIconFontHandle()));
+			hOldToolbarFont = reinterpret_cast<HFONT>(::SelectObject(hdc, GetUiFontHandle()));
 		}
 		for (size_t i = 0; i < m_toolbarButtonRects.size(); ++i)
 		{
@@ -3413,20 +4538,6 @@ public:
 		// Visual separator under menu/top bar.
 		if (m_nTopBarHeight > 0)
 		{
-			if (m_nTopBarHeight > 1)
-			{
-				RECT rcSoftDivider{
-					0,
-					m_nTopBarHeight - 2,
-					rcClient.right,
-					m_nTopBarHeight - 1
-				};
-				CBrush softDividerBrush;
-				const BYTE softAlpha = m_isDarkThemeApplied ? 96 : 118;
-				softDividerBrush.CreateSolidBrush(BlendColors(m_topBarBackgroundColor, m_topBarDividerColor, softAlpha));
-				::FillRect(hdc, &rcSoftDivider, softDividerBrush);
-			}
-
 			RECT rcHardDivider{
 				0,
 				m_nTopBarHeight - 1,
@@ -3483,10 +4594,30 @@ public:
 				DrawTopBar(hdc);
 			}
 		}
-		if (m_isFindPanelVisible && !::IsRectEmpty(&m_findPanelRect))
+		if (m_isFindPanelVisible)
 		{
-			RECT rcPaintFind{};
-			if (::IntersectRect(&rcPaintFind, &m_findPanelRect, &ps.rcPaint))
+			const int dpiY = GetDeviceCaps(hdc, LOGPIXELSY);
+			const int findAreaHeight = GetFindPanelAreaHeightForDpi(dpiY);
+			RECT rcFindArea{
+				0,
+				m_nTopBarHeight,
+				rcClient.right,
+				m_nTopBarHeight + findAreaHeight
+			};
+			RECT rcPaintFindArea{};
+			if (::IntersectRect(&rcPaintFindArea, &rcFindArea, &ps.rcPaint))
+			{
+				HBRUSH hAreaBrush = m_viewBackgroundBrush.m_hBrush != nullptr
+					? static_cast<HBRUSH>(m_viewBackgroundBrush)
+					: static_cast<HBRUSH>(::GetStockObject(DC_BRUSH));
+				if (hAreaBrush == static_cast<HBRUSH>(::GetStockObject(DC_BRUSH)))
+				{
+					::SetDCBrushColor(hdc, m_viewBackgroundColor);
+				}
+				::FillRect(hdc, &rcPaintFindArea, hAreaBrush);
+			}
+			RECT rcPaintFindPanel{};
+			if (!::IsRectEmpty(&m_findPanelRect) && ::IntersectRect(&rcPaintFindPanel, &m_findPanelRect, &ps.rcPaint))
 			{
 				DrawFindPanelBackground(hdc);
 			}
@@ -3502,12 +4633,17 @@ public:
 			GET_X_LPARAM(lParam),
 			GET_Y_LPARAM(lParam)
 		};
+		const int hoveredTitleButtonIndex = HitTestTitleBarButton(pt);
 		const int hoveredMenuIndex = HitTestTopMenuButton(pt);
 		const int hoveredToolbarIndex = HitTestToolbarButton(pt);
-		if (hoveredMenuIndex != m_topMenuHoveredIndex || hoveredToolbarIndex != m_toolbarHoveredIndex)
+		if (hoveredTitleButtonIndex != m_titleBarHoveredButtonIndex ||
+			hoveredMenuIndex != m_topMenuHoveredIndex ||
+			hoveredToolbarIndex != m_toolbarHoveredIndex)
 		{
+			m_titleBarHoveredButtonIndex = hoveredTitleButtonIndex;
 			m_topMenuHoveredIndex = hoveredMenuIndex;
 			m_toolbarHoveredIndex = hoveredToolbarIndex;
+			EnsureTopBarAnimationTimer();
 			InvalidateTopBar();
 		}
 
@@ -3522,32 +4658,85 @@ public:
 
 	LRESULT OnMouseLeave(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
-		if (m_topMenuHoveredIndex != -1 || m_toolbarHoveredIndex != -1)
+		if (m_titleBarHoveredButtonIndex != -1 || m_topMenuHoveredIndex != -1 || m_toolbarHoveredIndex != -1)
 		{
+			m_titleBarHoveredButtonIndex = -1;
 			m_topMenuHoveredIndex = -1;
 			m_toolbarHoveredIndex = -1;
+			EnsureTopBarAnimationTimer();
 			InvalidateTopBar();
 		}
 		bHandled = FALSE;
 		return 0;
 	}
 
+	LRESULT OnTimer(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled)
+	{
+		if (wParam == kTopBarAnimationTimerId)
+		{
+			UpdateTopBarAnimationState();
+			return 0;
+		}
+
+		bHandled = FALSE;
+		return 0;
+	}
+
 	LRESULT OnLButtonDown(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
 	{
+		if (!UseCustomTitleBar())
+		{
+			bHandled = FALSE;
+			return 0;
+		}
+
 		const POINT pt{
 			GET_X_LPARAM(lParam),
 			GET_Y_LPARAM(lParam)
 		};
-		if (pt.y >= 0 && pt.y < m_nTopBarHeight)
+		const int titleButtonIndex = HitTestTitleBarButton(pt);
+		if (titleButtonIndex >= 0)
 		{
-			const bool isTopMenuHit = HitTestTopMenuButton(pt) >= 0;
-			const bool isToolbarHit = HitTestToolbarButton(pt) >= 0;
-			if (!isTopMenuHit && !isToolbarHit)
-			{
-				::ReleaseCapture();
-				::SendMessageW(m_hWnd, WM_NCLBUTTONDOWN, HTCAPTION, MAKELPARAM(pt.x, pt.y));
-				return 0;
-			}
+			m_titleBarPressedButtonIndex = titleButtonIndex;
+			m_titleBarHoveredButtonIndex = titleButtonIndex;
+			::SetCapture(m_hWnd);
+			EnsureTopBarAnimationTimer();
+			InvalidateTopBar();
+			return 0;
+		}
+		if (HitTestTopMenuButton(pt) >= 0)
+		{
+			return 0;
+		}
+		if (IsPointInTitleBar(pt))
+		{
+			POINT ptScreen = pt;
+			::ClientToScreen(m_hWnd, &ptScreen);
+			::ReleaseCapture();
+			::SendMessageW(m_hWnd, WM_NCLBUTTONDOWN, HTCAPTION, MAKELPARAM(ptScreen.x, ptScreen.y));
+			return 0;
+		}
+
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnLButtonDblClk(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		if (!UseCustomTitleBar())
+		{
+			bHandled = FALSE;
+			return 0;
+		}
+
+		const POINT pt{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+		if (HitTestTopMenuButton(pt) < 0 && IsPointInTitleBar(pt) && HitTestTitleBarButton(pt) < 0)
+		{
+			::PostMessageW(m_hWnd, WM_SYSCOMMAND, ::IsZoomed(m_hWnd) ? SC_RESTORE : SC_MAXIMIZE, 0);
+			return 0;
 		}
 
 		bHandled = FALSE;
@@ -3560,6 +4749,24 @@ public:
 			GET_X_LPARAM(lParam),
 			GET_Y_LPARAM(lParam)
 		};
+		if (m_titleBarPressedButtonIndex >= 0)
+		{
+			const int pressedButtonIndex = m_titleBarPressedButtonIndex;
+			const int releasedButtonIndex = HitTestTitleBarButton(pt);
+			m_titleBarPressedButtonIndex = -1;
+			if (::GetCapture() == m_hWnd)
+			{
+				::ReleaseCapture();
+			}
+			EnsureTopBarAnimationTimer();
+			InvalidateTopBar();
+			if (releasedButtonIndex == pressedButtonIndex)
+			{
+				ExecuteTitleBarButtonCommand(releasedButtonIndex);
+				return 0;
+			}
+		}
+
 		const int toolbarIndex = HitTestToolbarButton(pt);
 		if (toolbarIndex >= 0)
 		{
@@ -3572,6 +4779,94 @@ public:
 		{
 			OpenTopMenuAtIndex(buttonIndex);
 			return 0;
+		}
+
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnRButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		const POINT pt{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+		if (HandleTopBarRightClick(pt))
+		{
+			bHandled = TRUE;
+			return 0;
+		}
+
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnContextMenu(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		if (!UseCustomTitleBar())
+		{
+			bHandled = FALSE;
+			return 0;
+		}
+
+		POINT ptScreen{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+		if (ptScreen.x == -1 && ptScreen.y == -1)
+		{
+			RECT rcWindow{};
+			::GetWindowRect(m_hWnd, &rcWindow);
+			ptScreen.x = rcWindow.left + 24;
+			ptScreen.y = rcWindow.top + (m_nTopBarHeight / 2);
+		}
+
+		POINT ptClient = ptScreen;
+		::ScreenToClient(m_hWnd, &ptClient);
+		if (HandleTopBarRightClick(ptClient))
+		{
+			bHandled = TRUE;
+			return 0;
+		}
+
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnNcRButtonUp(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		if (!UseCustomTitleBar())
+		{
+			bHandled = FALSE;
+			return 0;
+		}
+
+		POINT ptScreen{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+		POINT ptClient = ptScreen;
+		::ScreenToClient(m_hWnd, &ptClient);
+		if (HandleTopBarRightClick(ptClient))
+		{
+			bHandled = TRUE;
+			return 0;
+		}
+
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnCancelMode(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
+	{
+		if (m_titleBarPressedButtonIndex != -1)
+		{
+			m_titleBarPressedButtonIndex = -1;
+			if (::GetCapture() == m_hWnd)
+			{
+				::ReleaseCapture();
+			}
+			InvalidateTopBar();
 		}
 
 		bHandled = FALSE;
@@ -4036,6 +5331,109 @@ public:
 		return 0;
 	}
 
+	LRESULT OnGetMinMaxInfo(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		auto* pMinMaxInfo = reinterpret_cast<MINMAXINFO*>(lParam);
+		if (pMinMaxInfo != nullptr)
+		{
+			const UINT dpi = GetWindowDpiValue(m_hWnd);
+			const int minTrackWidth = MulDiv(kMinimumWindowTrackWidth, static_cast<int>((std::max)(dpi, 96U)), 96);
+			const int minTrackHeight = MulDiv(kMinimumWindowTrackHeight, static_cast<int>((std::max)(dpi, 96U)), 96);
+			pMinMaxInfo->ptMinTrackSize.x =
+				static_cast<LONG>((std::max)(static_cast<int>(pMinMaxInfo->ptMinTrackSize.x), minTrackWidth));
+			pMinMaxInfo->ptMinTrackSize.y =
+				static_cast<LONG>((std::max)(static_cast<int>(pMinMaxInfo->ptMinTrackSize.y), minTrackHeight));
+		}
+		bHandled = FALSE;
+		return 0;
+	}
+
+	LRESULT OnNcCalcSize(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+	{
+		if (!UseCustomTitleBar())
+		{
+			bHandled = FALSE;
+			return 0;
+		}
+
+		if (wParam == FALSE || lParam == 0)
+		{
+			bHandled = TRUE;
+			return 0;
+		}
+
+		auto* const pNcCalcSize = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
+		if (pNcCalcSize != nullptr && ::IsZoomed(m_hWnd))
+		{
+			const UINT dpi = GetWindowDpiValue(m_hWnd);
+			const int resizeBorderX = GetResizeBorderThicknessXForDpi(dpi);
+			const int resizeBorderY = GetResizeBorderThicknessYForDpi(dpi);
+			pNcCalcSize->rgrc[0].left += resizeBorderX;
+			pNcCalcSize->rgrc[0].right -= resizeBorderX;
+			pNcCalcSize->rgrc[0].top += resizeBorderY;
+			pNcCalcSize->rgrc[0].bottom -= resizeBorderY;
+		}
+
+		bHandled = TRUE;
+		return 0;
+	}
+
+	LRESULT OnNcHitTest(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
+	{
+		if (!UseCustomTitleBar())
+		{
+			bHandled = FALSE;
+			return 0;
+		}
+
+		const POINT ptScreen{
+			GET_X_LPARAM(lParam),
+			GET_Y_LPARAM(lParam)
+		};
+		POINT ptClient = ptScreen;
+		::ScreenToClient(m_hWnd, &ptClient);
+
+		const int resizeHit = HitTestWindowResizeEdges(ptClient, true);
+		if (resizeHit != HTCLIENT)
+		{
+			bHandled = TRUE;
+			return resizeHit;
+		}
+
+		if (HitTestTitleBarButton(ptClient) >= 0)
+		{
+			bHandled = TRUE;
+			return HTCLIENT;
+		}
+		if (IsPointInMenuBar(ptClient))
+		{
+			bHandled = TRUE;
+			return HTCLIENT;
+		}
+		if (IsPointInTitleBar(ptClient))
+		{
+			bHandled = TRUE;
+			return HTCAPTION;
+		}
+
+		bHandled = TRUE;
+		return HTCLIENT;
+	}
+
+	LRESULT OnNcActivate(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& bHandled)
+	{
+		if (!UseCustomTitleBar())
+		{
+			InvalidateTopBar();
+			bHandled = FALSE;
+			return 0;
+		}
+
+		bHandled = TRUE;
+		InvalidateTopBar();
+		return ::DefWindowProcW(m_hWnd, WM_NCACTIVATE, wParam, static_cast<LPARAM>(-1));
+	}
+
 	LRESULT OnCtlColorEdit(UINT /*uMsg*/, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
 	{
 		HDC hdc = reinterpret_cast<HDC>(wParam);
@@ -4229,37 +5627,7 @@ public:
 
 	LRESULT OnEraseBkgnd(UINT /*uMsg*/, WPARAM wParam, LPARAM /*lParam*/, BOOL& /*bHandled*/)
 	{
-		if (!m_frameBackgroundBrush.m_hBrush)
-		{
-			return FALSE;
-		}
-
-		HDC hdc = reinterpret_cast<HDC>(wParam);
-		RECT rc{};
-		::GetClientRect(m_hWnd, &rc);
-		if (m_nTopBarHeight < rc.bottom)
-		{
-			RECT rcBody = rc;
-			rcBody.top = m_nTopBarHeight;
-			::FillRect(hdc, &rcBody, m_frameBackgroundBrush.m_hBrush);
-			if (m_hWndStatusBar && m_isStatusBarVisible && m_statusBarBackgroundBrush.m_hBrush)
-			{
-				RECT rcStatus{};
-				::GetWindowRect(m_hWndStatusBar, &rcStatus);
-				::MapWindowPoints(nullptr, m_hWnd, reinterpret_cast<LPPOINT>(&rcStatus), 2);
-				RECT rcStatusFill{
-					0,
-					rcStatus.top > 0 ? rcStatus.top : 0,
-					rc.right,
-					rc.bottom
-				};
-				::FillRect(hdc, &rcStatusFill, m_statusBarBackgroundBrush.m_hBrush);
-			}
-		}
-		else
-		{
-			::FillRect(hdc, &rc, m_frameBackgroundBrush.m_hBrush);
-		}
+		UNREFERENCED_PARAMETER(wParam);
 		return TRUE;
 	}
 
@@ -4441,17 +5809,38 @@ public:
 		}
 		if (wParam != SIZE_MINIMIZED)
 		{
+			const UINT currentSizeType = static_cast<UINT>(wParam);
+			if (currentSizeType != m_lastSizeMessageType)
+			{
+				m_lastSizeMessageType = currentSizeType;
+				UpdateCustomChromeFrame();
+			}
 			LayoutMainControls();
 		}
+		else
+		{
+			m_lastSizeMessageType = static_cast<UINT>(wParam);
+		}
+		return 0;
+	}
+
+	LRESULT OnActivate(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
+	{
+		UpdateCustomChromeFrame();
+		bHandled = FALSE;
 		return 0;
 	}
 
 	LRESULT OnDestroy(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
+		StopTopBarAnimationTimer();
 		if (m_pCurrentFindReplaceDialog != nullptr && ::IsWindow(m_pCurrentFindReplaceDialog->m_hWnd))
 		{
 			DetachFindDialogSubclass(m_pCurrentFindReplaceDialog->m_hWnd);
 		}
+		DetachChromeResizeSubclassesForFindPanelControls();
+		DetachChromeResizeSubclass(m_view.m_hWnd);
+		DetachChromeResizeSubclass(m_hWndStatusBar);
 		CaptureCurrentWindowSizeIfRestored();
 		SaveWindowSizeToRegistry();
 		if (m_viewBackgroundBrush.m_hBrush)
@@ -4477,6 +5866,10 @@ public:
 		if (m_fontToolbarIcons.m_hFont)
 		{
 			m_fontToolbarIcons.DeleteObject();
+		}
+		if (m_fontTitleBarIcons.m_hFont)
+		{
+			m_fontTitleBarIcons.DeleteObject();
 		}
 		if (m_fontFindPanelText.m_hFont)
 		{
@@ -4520,6 +5913,7 @@ public:
 			{
 				NormalizeStatusBarStyles();
 				ApplyStatusBarTheme();
+				AttachChromeResizeSubclass(m_hWndStatusBar);
 			}
 			m_hMainMenu = ::LoadMenuW(_Module.GetResourceInstance(), MAKEINTRESOURCEW(IDR_MAINFRAME));
 			if (m_hMainMenu != nullptr)
@@ -4532,23 +5926,29 @@ public:
 			}
 
 			m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, 0);
+			AttachChromeResizeSubclass(m_view.m_hWnd);
 			m_view.SetLimitText(0x7ffffffe); // allow a lot of text to be entered
 			m_isWordWrapEnabled = ((::GetWindowLongPtrW(m_view, GWL_STYLE) & WS_HSCROLL) == 0);
 
 			CClientDC dc(*this);
 			auto dpi = GetDeviceCaps(dc, LOGPIXELSY);
 			auto dpi_factor_font = MulDiv(m_nFontSize, dpi, 72);
-			if (m_nWindowSizeX == DEFAULT_WIDTH && m_nWindowSizeY == DEFAULT_HEIGHT)
+			if (!m_hasPreparedInitialWindowSize)
 			{
-				// resize window depending on dpi scale factor
-				m_nWindowSizeX = MulDiv(m_nWindowSizeX, dpi, 96);
-				m_nWindowSizeY = MulDiv(m_nWindowSizeY, dpi, 96);
+				if (m_nWindowSizeX == DEFAULT_WIDTH && m_nWindowSizeY == DEFAULT_HEIGHT)
+				{
+					m_nWindowSizeX = MulDiv(m_nWindowSizeX, dpi, 96);
+					m_nWindowSizeY = MulDiv(m_nWindowSizeY, dpi, 96);
+				}
+				m_hasLoadedPersistedWindowSize = LoadWindowSizeFromRegistry();
 			}
-			LoadWindowSizeFromRegistry();
 			ClampWindowSizeToCurrentWorkArea();
-			m_nTopMenuHeight = MulDiv(42, dpi, 96);
+			m_hasPreparedInitialWindowSize = true;
+			m_nTopTitleBarHeight = MulDiv(46, dpi, 96);
+			m_nTopMenuHeight = m_nTopTitleBarHeight;
 			m_nToolbarHeight = 0;
-			m_nTopBarHeight = m_nTopMenuHeight;
+			m_nTopBarHeight = m_nTopTitleBarHeight;
+			const wchar_t* uiFontFace = IsFontFaceAvailable(L"Segoe UI Variable Text") ? L"Segoe UI Variable Text" : L"Segoe UI";
 			if (m_fontUi.m_hFont)
 			{
 				m_fontUi.DeleteObject();
@@ -4567,13 +5967,32 @@ public:
 				CLIP_DEFAULT_PRECIS,
 				CLEARTYPE_QUALITY,
 				DEFAULT_PITCH,
-				L"Segoe UI");
+				uiFontFace);
 			if (m_fontToolbarIcons.m_hFont)
 			{
 				m_fontToolbarIcons.DeleteObject();
 			}
 			m_fontToolbarIcons.CreateFont(
 				-MulDiv(11, dpi, 72),
+				0,
+				0,
+				0,
+				FW_NORMAL,
+				FALSE,
+				FALSE,
+				FALSE,
+				DEFAULT_CHARSET,
+				OUT_DEFAULT_PRECIS,
+				CLIP_DEFAULT_PRECIS,
+				CLEARTYPE_QUALITY,
+				DEFAULT_PITCH,
+				L"Segoe MDL2 Assets");
+			if (m_fontTitleBarIcons.m_hFont)
+			{
+				m_fontTitleBarIcons.DeleteObject();
+			}
+			m_fontTitleBarIcons.CreateFont(
+				-MulDiv(8, dpi, 72),
 				0,
 				0,
 				0,
@@ -4605,7 +6024,7 @@ public:
 				CLIP_DEFAULT_PRECIS,
 				CLEARTYPE_QUALITY,
 				DEFAULT_PITCH,
-				L"Segoe UI");
+				uiFontFace);
 			if (m_fontFindPanelIcons.m_hFont)
 			{
 				m_fontFindPanelIcons.DeleteObject();
@@ -4678,7 +6097,7 @@ public:
 				title = title.substr(0, nDotPos);
 			}
 
-			const std::string windowTitle = title + " - " + STR(IDR_MAINFRAME);
+			const std::string windowTitle = title;
 
 			// register object for message filtering and idle updates
 			CMessageLoop* pLoop = _Module.GetMessageLoop();
@@ -4707,7 +6126,9 @@ public:
 				::SetMenu(m_hWnd, nullptr);
 			}
 
-			SetWindowPos(NULL, 0, 0, m_nWindowSizeX, m_nWindowSizeY, SWP_NOZORDER | SWP_NOMOVE);
+			UpdateWindowFrameStyle();
+			UpdateCustomChromeFrame();
+			SetWindowPos(NULL, 0, 0, m_nWindowSizeX, m_nWindowSizeY, SWP_NOZORDER | SWP_NOMOVE | SWP_FRAMECHANGED);
 			CenterWindow();
 			LayoutMainControls();
 
