@@ -139,9 +139,15 @@ public:
 	static constexpr UINT kFindPanelReplaceAllButtonId = 0xE928;
 	static constexpr UINT kFindPanelOptionMatchCaseId = 0xE929;
 	static constexpr UINT kFindPanelOptionWrapId = 0xE92A;
+	static constexpr UINT kFindPanelOptionMatchCaseButtonId = 0xE92B;
+	static constexpr UINT kFindPanelOptionWrapButtonId = 0xE92C;
 	static constexpr UINT_PTR kTopBarAnimationTimerId = 0xE92B;
 	static constexpr UINT kTopBarAnimationIntervalMs = 16;
 	static constexpr UINT kTopBarAnimationDurationMs = 144;
+	static constexpr UINT_PTR kFindPanelAnimationTimerId = 0xE92D;
+	static constexpr UINT kFindPanelAnimationIntervalMs = 16;
+	static constexpr UINT kFindPanelAnimationDurationMs = 120;
+	static constexpr size_t kFindPanelAnimatedButtonCount = 9;
 	static constexpr int kMinimumWindowTrackWidth = 680;
 	static constexpr int kMinimumWindowTrackHeight = 440;
 	static constexpr int kStoredWindowMinWidth = 320;
@@ -172,6 +178,10 @@ public:
 	COLORREF m_findPanelButtonTextColor{ RGB(230, 230, 230) };
 	COLORREF m_findPanelInputBackgroundColor{ RGB(30, 30, 30) };
 	COLORREF m_findPanelInputBorderColor{ RGB(98, 98, 98) };
+	COLORREF m_findPanelAccentColor{ RGB(0, 120, 215) };
+	COLORREF m_findPanelPopupBackgroundColor{ RGB(44, 44, 46) };
+	COLORREF m_findPanelPopupBorderColor{ RGB(84, 84, 84) };
+	COLORREF m_findPanelPopupHoverColor{ RGB(60, 60, 60) };
 	CBrush m_viewBackgroundBrush;
 	CBrush m_frameBackgroundBrush;
 	CBrush m_statusBarBackgroundBrush;
@@ -212,6 +222,7 @@ public:
 	std::wstring m_statusBarText;
 	std::array<std::wstring, kStatusBarParts> m_statusBarPartTexts;
 	HWND m_hFindPanelToggleButton{ nullptr };
+	HWND m_hFindPanelBackgroundHost{ nullptr };
 	HWND m_hFindPanelFindEdit{ nullptr };
 	HWND m_hFindPanelFindNextButton{ nullptr };
 	HWND m_hFindPanelFindPrevButton{ nullptr };
@@ -221,15 +232,24 @@ public:
 	HWND m_hFindPanelReplaceButton{ nullptr };
 	HWND m_hFindPanelReplaceAllButton{ nullptr };
 	HWND m_hFindPanelSearchIcon{ nullptr };
+	HWND m_hFindPanelOptionsPopup{ nullptr };
+	HWND m_hFindPanelOptionMatchCaseButton{ nullptr };
+	HWND m_hFindPanelOptionWrapButton{ nullptr };
 	bool m_isFindPanelVisible{ false };
 	bool m_isReplacePanelVisible{ false };
 	bool m_isFindWrapEnabled{ true };
+	bool m_isFindPanelOptionsPopupVisible{ false };
 	bool m_isMenuPopupTracking{ false };
 	HWND m_hHotFindPanelButton{ nullptr };
+	HWND m_hPressedFindPanelButton{ nullptr };
+	bool m_findPanelAnimationTimerActive{ false };
+	std::array<BYTE, kFindPanelAnimatedButtonCount> m_findPanelButtonHoverBlends{};
+	std::array<BYTE, kFindPanelAnimatedButtonCount> m_findPanelButtonPressBlends{};
 	RECT m_findPanelRect{};
 	RECT m_findPanelFindEditFrameRect{};
 	RECT m_findPanelReplaceEditFrameRect{};
 	RECT m_findPanelSearchIconRect{};
+	RECT m_findPanelOptionsPopupRect{};
 
 	CMainFrame()
 	{
@@ -239,6 +259,46 @@ public:
 
 	virtual BOOL PreTranslateMessage(MSG* pMsg)
 	{
+		if (pMsg != nullptr && m_isFindPanelOptionsPopupVisible)
+		{
+			switch (pMsg->message)
+			{
+			case WM_LBUTTONDOWN:
+			case WM_RBUTTONDOWN:
+			case WM_MBUTTONDOWN:
+			case WM_NCLBUTTONDOWN:
+			case WM_NCRBUTTONDOWN:
+			case WM_NCMBUTTONDOWN:
+			{
+				POINT ptScreen{
+					GET_X_LPARAM(pMsg->lParam),
+					GET_Y_LPARAM(pMsg->lParam)
+				};
+				const bool isClientMouseMessage =
+					pMsg->message == WM_LBUTTONDOWN ||
+					pMsg->message == WM_RBUTTONDOWN ||
+					pMsg->message == WM_MBUTTONDOWN;
+				if (isClientMouseMessage && pMsg->hwnd != nullptr && ::IsWindow(pMsg->hwnd))
+				{
+					::ClientToScreen(pMsg->hwnd, &ptScreen);
+				}
+
+				const bool isInsidePopup =
+					IsScreenPointInWindow(m_hFindPanelOptionsPopup, ptScreen) ||
+					IsScreenPointInWindow(m_hFindPanelOptionMatchCaseButton, ptScreen) ||
+					IsScreenPointInWindow(m_hFindPanelOptionWrapButton, ptScreen);
+				const bool isInsideOptionsButton = IsScreenPointInWindow(m_hFindPanelOptionsButton, ptScreen);
+				if (!isInsidePopup && !isInsideOptionsButton)
+				{
+					SetFindPanelOptionsPopupVisible(false);
+				}
+				break;
+			}
+			default:
+				break;
+			}
+		}
+
 		if (pMsg != nullptr && pMsg->message == WM_KEYDOWN)
 		{
 			const bool ctrlPressed = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -259,6 +319,12 @@ public:
 			if (hFocus == m_hFindPanelReplaceEdit && pMsg->wParam == VK_RETURN)
 			{
 				ReplaceCurrentSelection();
+				return TRUE;
+			}
+			if (m_isFindPanelOptionsPopupVisible && pMsg->wParam == VK_ESCAPE)
+			{
+				SetFindPanelOptionsPopupVisible(false);
+				FocusFindPanelEdit(false);
 				return TRUE;
 			}
 			if (m_isFindPanelVisible && pMsg->wParam == VK_ESCAPE)
@@ -311,6 +377,7 @@ public:
 	BEGIN_MSG_MAP(CMainFrame)
 		MESSAGE_HANDLER(WM_CREATE, OnCreate)
 		MESSAGE_HANDLER(WM_ACTIVATE, OnActivate)
+		MESSAGE_HANDLER(WM_MOVE, OnMove)
 		MESSAGE_HANDLER(WM_SIZE, OnSize)
 		MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
 		MESSAGE_HANDLER(WM_CLOSE, OnClose)
@@ -385,7 +452,13 @@ public:
 		COMMAND_ID_HANDLER(kFindPanelCloseButtonId, OnFindPanelClose)
 		COMMAND_ID_HANDLER(kFindPanelReplaceButtonId, OnFindPanelReplaceOne)
 		COMMAND_ID_HANDLER(kFindPanelReplaceAllButtonId, OnFindPanelReplaceAll)
+		COMMAND_ID_HANDLER(kFindPanelOptionMatchCaseButtonId, OnFindPanelToggleMatchCase)
+		COMMAND_ID_HANDLER(kFindPanelOptionWrapButtonId, OnFindPanelToggleWrap)
 		COMMAND_HANDLER(kFindPanelFindEditId, EN_CHANGE, OnFindPanelFindTextChange)
+		COMMAND_HANDLER(kFindPanelFindEditId, EN_SETFOCUS, OnFindPanelEditFocusChange)
+		COMMAND_HANDLER(kFindPanelFindEditId, EN_KILLFOCUS, OnFindPanelEditFocusChange)
+		COMMAND_HANDLER(kFindPanelReplaceEditId, EN_SETFOCUS, OnFindPanelEditFocusChange)
+		COMMAND_HANDLER(kFindPanelReplaceEditId, EN_KILLFOCUS, OnFindPanelEditFocusChange)
 		COMMAND_CODE_HANDLER(EN_CHANGE, OnChange)
 		CHAIN_MSG_MAP(CFrameWindowImpl<CMainFrame>)
 	END_MSG_MAP()
@@ -2119,6 +2192,10 @@ public:
 			m_findPanelButtonTextColor = RGB(236, 236, 236);
 			m_findPanelInputBackgroundColor = RGB(58, 58, 60);
 			m_findPanelInputBorderColor = RGB(86, 88, 92);
+			m_findPanelAccentColor = RGB(76, 156, 230);
+			m_findPanelPopupBackgroundColor = RGB(43, 44, 47);
+			m_findPanelPopupBorderColor = RGB(74, 76, 80);
+			m_findPanelPopupHoverColor = RGB(62, 63, 66);
 		}
 		else
 		{
@@ -2144,6 +2221,10 @@ public:
 			m_findPanelButtonTextColor = RGB(52, 52, 52);
 			m_findPanelInputBackgroundColor = RGB(255, 255, 255);
 			m_findPanelInputBorderColor = RGB(189, 196, 209);
+			m_findPanelAccentColor = RGB(0, 95, 184);
+			m_findPanelPopupBackgroundColor = RGB(252, 253, 255);
+			m_findPanelPopupBorderColor = RGB(205, 210, 219);
+			m_findPanelPopupHoverColor = RGB(234, 239, 247);
 		}
 
 		if (m_viewBackgroundBrush.m_hBrush)
@@ -2196,14 +2277,16 @@ public:
 				ApplyExplorerTheme(hWndEdit, m_isDarkThemeApplied);
 			}
 		}
-		const std::array<HWND, 7> findButtons{
+		const std::array<HWND, 9> findButtons{
 			m_hFindPanelToggleButton,
 			m_hFindPanelFindNextButton,
 			m_hFindPanelFindPrevButton,
 			m_hFindPanelOptionsButton,
 			m_hFindPanelCloseButton,
 			m_hFindPanelReplaceButton,
-			m_hFindPanelReplaceAllButton
+			m_hFindPanelReplaceAllButton,
+			m_hFindPanelOptionMatchCaseButton,
+			m_hFindPanelOptionWrapButton
 		};
 		for (const HWND hWndButton : findButtons)
 		{
@@ -2217,6 +2300,16 @@ public:
 		{
 			ApplyDarkModeForWindow(m_hFindPanelSearchIcon);
 			ApplyWindowThemeName(m_hFindPanelSearchIcon, L"");
+		}
+		if (m_hFindPanelBackgroundHost != nullptr)
+		{
+			ApplyDarkModeForWindow(m_hFindPanelBackgroundHost);
+			ApplyWindowThemeName(m_hFindPanelBackgroundHost, L"");
+		}
+		if (m_hFindPanelOptionsPopup != nullptr)
+		{
+			ApplyDarkModeForWindow(m_hFindPanelOptionsPopup);
+			ApplyWindowThemeName(m_hFindPanelOptionsPopup, L"");
 		}
 
 		Invalidate(FALSE);
@@ -2314,6 +2407,67 @@ public:
 		if (menuDone && titleDone)
 		{
 			StopTopBarAnimationTimer();
+		}
+	}
+
+	void EnsureFindPanelAnimationTimer()
+	{
+		if (!m_hWnd || m_findPanelAnimationTimerActive)
+		{
+			return;
+		}
+
+		if (::SetTimer(m_hWnd, kFindPanelAnimationTimerId, kFindPanelAnimationIntervalMs, nullptr) != 0)
+		{
+			m_findPanelAnimationTimerActive = true;
+		}
+	}
+
+	void StopFindPanelAnimationTimer()
+	{
+		if (!m_hWnd || !m_findPanelAnimationTimerActive)
+		{
+			return;
+		}
+
+		::KillTimer(m_hWnd, kFindPanelAnimationTimerId);
+		m_findPanelAnimationTimerActive = false;
+	}
+
+	void UpdateFindPanelAnimationState()
+	{
+		bool anyChanged = false;
+		bool allDone = true;
+
+		for (size_t i = 0; i < kFindPanelAnimatedButtonCount; ++i)
+		{
+			const HWND hWndButton = GetFindPanelAnimatedButtonByIndex(i);
+			const bool isTrackedButton = hWndButton != nullptr && ::IsWindow(hWndButton) && ::IsWindowVisible(hWndButton);
+			const BYTE hoverTarget = (isTrackedButton && hWndButton == m_hHotFindPanelButton) ? 255 : 0;
+			const BYTE pressTarget = (isTrackedButton && hWndButton == m_hPressedFindPanelButton) ? 255 : 0;
+
+			const bool hoverChanged = StepBlendTowardsTarget(m_findPanelButtonHoverBlends[i], hoverTarget);
+			const bool pressChanged = StepBlendTowardsTarget(m_findPanelButtonPressBlends[i], pressTarget);
+			if ((hoverChanged || pressChanged) && isTrackedButton)
+			{
+				::InvalidateRect(hWndButton, nullptr, FALSE);
+				anyChanged = true;
+			}
+
+			if (m_findPanelButtonHoverBlends[i] != hoverTarget || m_findPanelButtonPressBlends[i] != pressTarget)
+			{
+				allDone = false;
+			}
+		}
+
+		if (anyChanged && m_hFindPanelBackgroundHost != nullptr && ::IsWindowVisible(m_hFindPanelBackgroundHost))
+		{
+			::RedrawWindow(m_hFindPanelBackgroundHost, nullptr, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_ALLCHILDREN);
+		}
+
+		if (allDone)
+		{
+			StopFindPanelAnimationTimer();
 		}
 	}
 
@@ -2899,9 +3053,9 @@ public:
 		const int leftPadding = MulDiv(16, dpiX, 96);
 		const int rightPadding = MulDiv(12, dpiX, 96);
 		const int itemPaddingX = MulDiv(12, dpiX, 96);
-		const int itemSpacing = MulDiv(8, dpiX, 96);
-		const int topInset = menuTop + MulDiv(8, dpiX, 96);
-		const int bottomInset = MulDiv(8, dpiX, 96);
+		const int itemSpacing = MulDiv(2, dpiX, 96);
+		const int topInset = menuTop;
+		const int bottomInset = MulDiv(1, dpiX, 96);
 
 		HFONT hOldFont = reinterpret_cast<HFONT>(::SelectObject(dc, GetUiFontHandle()));
 
@@ -3130,6 +3284,7 @@ public:
 	bool IsFindPanelControl(const HWND hWndChild) const
 	{
 		return
+			hWndChild == m_hFindPanelBackgroundHost ||
 			hWndChild == m_hFindPanelToggleButton ||
 			hWndChild == m_hFindPanelFindEdit ||
 			hWndChild == m_hFindPanelFindNextButton ||
@@ -3139,7 +3294,117 @@ public:
 			hWndChild == m_hFindPanelReplaceEdit ||
 			hWndChild == m_hFindPanelReplaceButton ||
 			hWndChild == m_hFindPanelReplaceAllButton ||
-			hWndChild == m_hFindPanelSearchIcon;
+			hWndChild == m_hFindPanelSearchIcon ||
+			hWndChild == m_hFindPanelOptionsPopup ||
+			hWndChild == m_hFindPanelOptionMatchCaseButton ||
+			hWndChild == m_hFindPanelOptionWrapButton;
+	}
+
+	bool IsFindPanelOptionsPopupMessageTarget(const HWND hWndChild) const
+	{
+		return
+			hWndChild == m_hFindPanelOptionsPopup ||
+			hWndChild == m_hFindPanelOptionMatchCaseButton ||
+			hWndChild == m_hFindPanelOptionWrapButton;
+	}
+
+	bool IsScreenPointInWindow(const HWND hWnd, const POINT ptScreen) const
+	{
+		if (hWnd == nullptr || !::IsWindow(hWnd) || !::IsWindowVisible(hWnd))
+		{
+			return false;
+		}
+
+		RECT rcWindow{};
+		if (!::GetWindowRect(hWnd, &rcWindow))
+		{
+			return false;
+		}
+
+		return ::PtInRect(&rcWindow, ptScreen) != FALSE;
+	}
+
+	HWND GetFindPanelAnimatedButtonByIndex(const size_t index) const
+	{
+		switch (index)
+		{
+		case 0: return m_hFindPanelToggleButton;
+		case 1: return m_hFindPanelFindNextButton;
+		case 2: return m_hFindPanelFindPrevButton;
+		case 3: return m_hFindPanelOptionsButton;
+		case 4: return m_hFindPanelCloseButton;
+		case 5: return m_hFindPanelReplaceButton;
+		case 6: return m_hFindPanelReplaceAllButton;
+		case 7: return m_hFindPanelOptionMatchCaseButton;
+		case 8: return m_hFindPanelOptionWrapButton;
+		default: return nullptr;
+		}
+	}
+
+	int GetFindPanelAnimatedButtonIndex(const HWND hWndButton) const
+	{
+		for (size_t i = 0; i < kFindPanelAnimatedButtonCount; ++i)
+		{
+			if (GetFindPanelAnimatedButtonByIndex(i) == hWndButton)
+			{
+				return static_cast<int>(i);
+			}
+		}
+
+		return -1;
+	}
+
+	template <typename PaintFn>
+	void PaintWindowBuffered(HWND hWnd, HDC hdcTarget, PaintFn&& paintFn) const
+	{
+		if (hWnd == nullptr || hdcTarget == nullptr)
+		{
+			return;
+		}
+
+		RECT rcClient{};
+		::GetClientRect(hWnd, &rcClient);
+		const int width = rcClient.right - rcClient.left;
+		const int height = rcClient.bottom - rcClient.top;
+		if (width <= 0 || height <= 0)
+		{
+			return;
+		}
+
+		HDC hdcMem = ::CreateCompatibleDC(hdcTarget);
+		HBITMAP hbmMem = nullptr;
+		HGDIOBJ hOldBitmap = nullptr;
+		bool didBufferedPaint = false;
+
+		if (hdcMem != nullptr)
+		{
+			hbmMem = ::CreateCompatibleBitmap(hdcTarget, width, height);
+			if (hbmMem != nullptr)
+			{
+				hOldBitmap = ::SelectObject(hdcMem, hbmMem);
+				paintFn(hdcMem);
+				::BitBlt(hdcTarget, 0, 0, width, height, hdcMem, 0, 0, SRCCOPY);
+				didBufferedPaint = true;
+			}
+		}
+
+		if (!didBufferedPaint)
+		{
+			paintFn(hdcTarget);
+		}
+
+		if (hOldBitmap != nullptr)
+		{
+			::SelectObject(hdcMem, hOldBitmap);
+		}
+		if (hbmMem != nullptr)
+		{
+			::DeleteObject(hbmMem);
+		}
+		if (hdcMem != nullptr)
+		{
+			::DeleteDC(hdcMem);
+		}
 	}
 
 	static LRESULT CALLBACK FindPanelButtonSubclassProc(
@@ -3155,6 +3420,20 @@ public:
 		{
 			switch (uMsg)
 			{
+			case WM_ERASEBKGND:
+				return TRUE;
+			case WM_LBUTTONDOWN:
+			case WM_LBUTTONDBLCLK:
+				self->UpdatePressedFindPanelButton(hWnd);
+				break;
+			case WM_LBUTTONUP:
+			case WM_CAPTURECHANGED:
+			case WM_CANCELMODE:
+				if (self->m_hPressedFindPanelButton == hWnd)
+				{
+					self->UpdatePressedFindPanelButton(nullptr);
+				}
+				break;
 			case WM_MOUSEMOVE:
 			{
 				self->UpdateHotFindPanelButton(hWnd);
@@ -3174,6 +3453,10 @@ public:
 				if (self->m_hHotFindPanelButton == hWnd)
 				{
 					self->m_hHotFindPanelButton = nullptr;
+				}
+				if (self->m_hPressedFindPanelButton == hWnd)
+				{
+					self->m_hPressedFindPanelButton = nullptr;
 				}
 				::RemoveWindowSubclass(hWnd, FindPanelButtonSubclassProc, 0);
 				break;
@@ -3201,12 +3484,38 @@ public:
 		m_hHotFindPanelButton = hWndHot;
 		if (hOldHot != nullptr && ::IsWindow(hOldHot))
 		{
-			::InvalidateRect(hOldHot, nullptr, TRUE);
+			::InvalidateRect(hOldHot, nullptr, FALSE);
 		}
 		if (m_hHotFindPanelButton != nullptr && ::IsWindow(m_hHotFindPanelButton))
 		{
-			::InvalidateRect(m_hHotFindPanelButton, nullptr, TRUE);
+			::InvalidateRect(m_hHotFindPanelButton, nullptr, FALSE);
 		}
+		EnsureFindPanelAnimationTimer();
+	}
+
+	void UpdatePressedFindPanelButton(HWND hWndPressed)
+	{
+		if (hWndPressed != nullptr && !::IsWindow(hWndPressed))
+		{
+			hWndPressed = nullptr;
+		}
+
+		if (m_hPressedFindPanelButton == hWndPressed)
+		{
+			return;
+		}
+
+		const HWND hOldPressed = m_hPressedFindPanelButton;
+		m_hPressedFindPanelButton = hWndPressed;
+		if (hOldPressed != nullptr && ::IsWindow(hOldPressed))
+		{
+			::InvalidateRect(hOldPressed, nullptr, FALSE);
+		}
+		if (m_hPressedFindPanelButton != nullptr && ::IsWindow(m_hPressedFindPanelButton))
+		{
+			::InvalidateRect(m_hPressedFindPanelButton, nullptr, FALSE);
+		}
+		EnsureFindPanelAnimationTimer();
 	}
 
 	void SubclassFindPanelButton(HWND hWndButton)
@@ -3223,9 +3532,167 @@ public:
 			reinterpret_cast<DWORD_PTR>(this));
 	}
 
+	static LRESULT CALLBACK FindPanelOptionsPopupSubclassProc(
+		HWND hWnd,
+		UINT uMsg,
+		WPARAM wParam,
+		LPARAM lParam,
+		UINT_PTR /*uIdSubclass*/,
+		DWORD_PTR dwRefData)
+	{
+		auto* self = reinterpret_cast<CMainFrame*>(dwRefData);
+		if (self != nullptr)
+		{
+			switch (uMsg)
+			{
+			case WM_ERASEBKGND:
+				return TRUE;
+			case WM_PAINT:
+			{
+				PAINTSTRUCT ps{};
+				HDC hdc = ::BeginPaint(hWnd, &ps);
+				self->PaintWindowBuffered(
+					hWnd,
+					hdc,
+					[&](HDC hdcPaint)
+					{
+						self->DrawFindPanelOptionsPopupBackground(hWnd, hdcPaint);
+					});
+				::EndPaint(hWnd, &ps);
+				return 0;
+			}
+			case WM_COMMAND:
+			case WM_DRAWITEM:
+				if (self->m_hWnd != nullptr && ::IsWindow(self->m_hWnd))
+				{
+					return ::SendMessageW(self->m_hWnd, uMsg, wParam, lParam);
+				}
+				return 0;
+			case WM_NCDESTROY:
+				::RemoveWindowSubclass(hWnd, FindPanelOptionsPopupSubclassProc, 0);
+				break;
+			default:
+				break;
+			}
+		}
+
+		return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
+	}
+
+	void SubclassFindPanelOptionsPopup(HWND hWndPopup)
+	{
+		if (hWndPopup == nullptr || !::IsWindow(hWndPopup))
+		{
+			return;
+		}
+
+		::SetWindowSubclass(
+			hWndPopup,
+			FindPanelOptionsPopupSubclassProc,
+			0,
+			reinterpret_cast<DWORD_PTR>(this));
+	}
+
+	static LRESULT CALLBACK FindPanelBackgroundHostSubclassProc(
+		HWND hWnd,
+		UINT uMsg,
+		WPARAM wParam,
+		LPARAM lParam,
+		UINT_PTR /*uIdSubclass*/,
+		DWORD_PTR dwRefData)
+	{
+		auto* self = reinterpret_cast<CMainFrame*>(dwRefData);
+		if (self != nullptr)
+		{
+			switch (uMsg)
+			{
+			case WM_ERASEBKGND:
+				return TRUE;
+			case WM_PAINT:
+			{
+				PAINTSTRUCT ps{};
+				HDC hdc = ::BeginPaint(hWnd, &ps);
+				self->PaintWindowBuffered(
+					hWnd,
+					hdc,
+					[&](HDC hdcPaint)
+					{
+						self->DrawFindPanelBackground(hdcPaint);
+					});
+				::EndPaint(hWnd, &ps);
+				return 0;
+			}
+			case WM_COMMAND:
+			case WM_DRAWITEM:
+			case WM_CTLCOLOREDIT:
+			case WM_CTLCOLORSTATIC:
+				if (self->m_hWnd != nullptr && ::IsWindow(self->m_hWnd))
+				{
+					return ::SendMessageW(self->m_hWnd, uMsg, wParam, lParam);
+				}
+				return 0;
+			case WM_NCDESTROY:
+				::RemoveWindowSubclass(hWnd, FindPanelBackgroundHostSubclassProc, 0);
+				break;
+			default:
+				break;
+			}
+		}
+
+		return ::DefSubclassProc(hWnd, uMsg, wParam, lParam);
+	}
+
+	void SubclassFindPanelBackgroundHost(HWND hWndHost)
+	{
+		if (hWndHost == nullptr || !::IsWindow(hWndHost))
+		{
+			return;
+		}
+
+		::SetWindowSubclass(
+			hWndHost,
+			FindPanelBackgroundHostSubclassProc,
+			0,
+			reinterpret_cast<DWORD_PTR>(this));
+	}
+
+	static LPCWSTR GetFindPanelHostWindowClassName()
+	{
+		return L"LockNote2.FindPanelHostWindow";
+	}
+
+	static LPCWSTR GetFindPanelPopupWindowClassName()
+	{
+		return L"LockNote2.FindPanelPopupWindow";
+	}
+
+	void EnsureFindPanelWindowClassesRegistered() const
+	{
+		const auto ensureClass = [&](LPCWSTR className)
+		{
+			WNDCLASSW wc{};
+			if (::GetClassInfoW(_Module.GetModuleInstance(), className, &wc))
+			{
+				return;
+			}
+
+			wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+			wc.lpfnWndProc = ::DefWindowProcW;
+			wc.hInstance = _Module.GetModuleInstance();
+			wc.hCursor = ::LoadCursor(nullptr, IDC_ARROW);
+			wc.hbrBackground = nullptr;
+			wc.lpszClassName = className;
+			::RegisterClassW(&wc);
+		};
+
+		ensureClass(GetFindPanelHostWindowClassName());
+		ensureClass(GetFindPanelPopupWindowClassName());
+	}
+
 	void AttachChromeResizeSubclassesForFindPanelControls()
 	{
-		const std::array<HWND, 10> findControls{
+		const std::array<HWND, 11> findControls{
+			m_hFindPanelBackgroundHost,
 			m_hFindPanelToggleButton,
 			m_hFindPanelFindEdit,
 			m_hFindPanelFindNextButton,
@@ -3245,7 +3712,8 @@ public:
 
 	void DetachChromeResizeSubclassesForFindPanelControls() const
 	{
-		const std::array<HWND, 10> findControls{
+		const std::array<HWND, 11> findControls{
+			m_hFindPanelBackgroundHost,
 			m_hFindPanelToggleButton,
 			m_hFindPanelFindEdit,
 			m_hFindPanelFindNextButton,
@@ -3270,10 +3738,25 @@ public:
 			return;
 		}
 
-		const DWORD iconButtonStyle = WS_CHILD | WS_TABSTOP | BS_OWNERDRAW;
-		const DWORD textButtonStyle = WS_CHILD | WS_TABSTOP | BS_OWNERDRAW;
+		EnsureFindPanelWindowClassesRegistered();
+
+		const DWORD iconButtonStyle = WS_CHILD | BS_OWNERDRAW;
+		const DWORD textButtonStyle = WS_CHILD | BS_OWNERDRAW;
 		const DWORD editStyle = WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL;
 
+		m_hFindPanelBackgroundHost = ::CreateWindowExW(
+			WS_EX_CONTROLPARENT,
+			GetFindPanelHostWindowClassName(),
+			L"",
+			WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+			0,
+			0,
+			0,
+			0,
+			m_hWnd,
+			nullptr,
+			_Module.GetModuleInstance(),
+			nullptr);
 		m_hFindPanelToggleButton = ::CreateWindowExW(
 			0,
 			L"Button",
@@ -3283,7 +3766,7 @@ public:
 			0,
 			0,
 			0,
-			m_hWnd,
+			m_hFindPanelBackgroundHost,
 			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelToggleButtonId)),
 			_Module.GetModuleInstance(),
 			nullptr);
@@ -3296,7 +3779,7 @@ public:
 			0,
 			0,
 			0,
-			m_hWnd,
+			m_hFindPanelBackgroundHost,
 			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelFindEditId)),
 			_Module.GetModuleInstance(),
 			nullptr);
@@ -3309,7 +3792,7 @@ public:
 			0,
 			0,
 			0,
-			m_hWnd,
+			m_hFindPanelBackgroundHost,
 			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelFindNextButtonId)),
 			_Module.GetModuleInstance(),
 			nullptr);
@@ -3322,7 +3805,7 @@ public:
 			0,
 			0,
 			0,
-			m_hWnd,
+			m_hFindPanelBackgroundHost,
 			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelFindPrevButtonId)),
 			_Module.GetModuleInstance(),
 			nullptr);
@@ -3335,7 +3818,7 @@ public:
 			0,
 			0,
 			0,
-			m_hWnd,
+			m_hFindPanelBackgroundHost,
 			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelOptionsButtonId)),
 			_Module.GetModuleInstance(),
 			nullptr);
@@ -3348,7 +3831,7 @@ public:
 			0,
 			0,
 			0,
-			m_hWnd,
+			m_hFindPanelBackgroundHost,
 			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelCloseButtonId)),
 			_Module.GetModuleInstance(),
 			nullptr);
@@ -3361,7 +3844,7 @@ public:
 			0,
 			0,
 			0,
-			m_hWnd,
+			m_hFindPanelBackgroundHost,
 			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelReplaceEditId)),
 			_Module.GetModuleInstance(),
 			nullptr);
@@ -3374,7 +3857,7 @@ public:
 			0,
 			0,
 			0,
-			m_hWnd,
+			m_hFindPanelBackgroundHost,
 			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelReplaceButtonId)),
 			_Module.GetModuleInstance(),
 			nullptr);
@@ -3387,7 +3870,7 @@ public:
 			0,
 			0,
 			0,
-			m_hWnd,
+			m_hFindPanelBackgroundHost,
 			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelReplaceAllButtonId)),
 			_Module.GetModuleInstance(),
 			nullptr);
@@ -3400,24 +3883,67 @@ public:
 			0,
 			0,
 			0,
+			m_hFindPanelBackgroundHost,
+			nullptr,
+			_Module.GetModuleInstance(),
+			nullptr);
+		m_hFindPanelOptionsPopup = ::CreateWindowExW(
+			WS_EX_CONTROLPARENT | WS_EX_TOOLWINDOW,
+			GetFindPanelPopupWindowClassName(),
+			L"",
+			WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+			0,
+			0,
+			0,
+			0,
 			m_hWnd,
 			nullptr,
 			_Module.GetModuleInstance(),
 			nullptr);
+		m_hFindPanelOptionMatchCaseButton = ::CreateWindowExW(
+			0,
+			L"Button",
+			L"",
+			textButtonStyle,
+			0,
+			0,
+			0,
+			0,
+			m_hFindPanelOptionsPopup,
+			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelOptionMatchCaseButtonId)),
+			_Module.GetModuleInstance(),
+			nullptr);
+		m_hFindPanelOptionWrapButton = ::CreateWindowExW(
+			0,
+			L"Button",
+			L"",
+			textButtonStyle,
+			0,
+			0,
+			0,
+			0,
+			m_hFindPanelOptionsPopup,
+			reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kFindPanelOptionWrapButtonId)),
+			_Module.GetModuleInstance(),
+			nullptr);
 
-		const std::array<HWND, 7> findButtons{
+		const std::array<HWND, 9> findButtons{
 			m_hFindPanelToggleButton,
 			m_hFindPanelFindNextButton,
 			m_hFindPanelFindPrevButton,
 			m_hFindPanelOptionsButton,
 			m_hFindPanelCloseButton,
 			m_hFindPanelReplaceButton,
-			m_hFindPanelReplaceAllButton
+			m_hFindPanelReplaceAllButton,
+			m_hFindPanelOptionMatchCaseButton,
+			m_hFindPanelOptionWrapButton
 		};
 		for (const HWND hWndButton : findButtons)
 		{
 			SubclassFindPanelButton(hWndButton);
 		}
+		SubclassFindPanelBackgroundHost(m_hFindPanelBackgroundHost);
+		SubclassFindPanelOptionsPopup(m_hFindPanelOptionsPopup);
 		AttachChromeResizeSubclassesForFindPanelControls();
 	}
 
@@ -3431,11 +3957,13 @@ public:
 			? static_cast<HFONT>(m_fontFindPanelIcons)
 			: GetToolbarIconFontHandle();
 
-		const std::array<HWND, 4> textControls{
+		const std::array<HWND, 6> textControls{
 			m_hFindPanelFindEdit,
 			m_hFindPanelReplaceEdit,
 			m_hFindPanelReplaceButton,
-			m_hFindPanelReplaceAllButton
+			m_hFindPanelReplaceAllButton,
+			m_hFindPanelOptionMatchCaseButton,
+			m_hFindPanelOptionWrapButton
 		};
 		for (const HWND hWndControl : textControls)
 		{
@@ -3468,6 +3996,14 @@ public:
 		if (m_hFindPanelReplaceAllButton != nullptr)
 		{
 			::SetWindowTextW(m_hFindPanelReplaceAllButton, GetFindPanelReplaceAllCaption().c_str());
+		}
+		if (m_hFindPanelOptionMatchCaseButton != nullptr)
+		{
+			::SetWindowTextW(m_hFindPanelOptionMatchCaseButton, GetFindPanelMatchCaseCaption().c_str());
+		}
+		if (m_hFindPanelOptionWrapButton != nullptr)
+		{
+			::SetWindowTextW(m_hFindPanelOptionWrapButton, GetFindPanelWrapCaption().c_str());
 		}
 
 		if (m_hFindPanelFindEdit != nullptr)
@@ -3535,6 +4071,66 @@ public:
 		}
 	}
 
+	int GetFindPanelOptionsPopupWidthForDpi(const int dpiX) const
+	{
+		int maxTextWidth = 0;
+		const HFONT popupFont = (m_fontFindPanelText.m_hFont != nullptr)
+			? static_cast<HFONT>(m_fontFindPanelText)
+			: GetUiFontHandle();
+		HDC hdc = (m_hWnd != nullptr && ::IsWindow(m_hWnd)) ? ::GetDC(m_hWnd) : nullptr;
+		if (hdc != nullptr)
+		{
+			HFONT hOldFont = nullptr;
+			if (popupFont != nullptr)
+			{
+				hOldFont = reinterpret_cast<HFONT>(::SelectObject(hdc, popupFont));
+			}
+
+			const std::array<std::wstring, 2> popupCaptions{
+				GetFindPanelMatchCaseCaption(),
+				GetFindPanelWrapCaption()
+			};
+			for (const std::wstring& caption : popupCaptions)
+			{
+				SIZE textSize{};
+				if (::GetTextExtentPoint32W(hdc, caption.c_str(), static_cast<int>(caption.size()), &textSize))
+				{
+					maxTextWidth = (std::max)(maxTextWidth, static_cast<int>(textSize.cx));
+				}
+			}
+
+			if (hOldFont != nullptr)
+			{
+				::SelectObject(hdc, hOldFont);
+			}
+			::ReleaseDC(m_hWnd, hdc);
+		}
+
+		const int horizontalPadding = MulDiv(46, dpiX, 96);
+		return (std::max)(MulDiv(210, dpiX, 96), maxTextWidth + horizontalPadding);
+	}
+
+	void UpdateFindPanelOptionsPopupVisibility()
+	{
+		EnsureFindPanelControlsCreated();
+		const auto setVisible = [](HWND hWndControl, const bool visible)
+		{
+			if (hWndControl != nullptr)
+			{
+				const bool isVisible = (::GetWindowLongPtrW(hWndControl, GWL_STYLE) & WS_VISIBLE) != 0;
+				if (isVisible != visible)
+				{
+					::ShowWindow(hWndControl, visible ? SW_SHOWNA : SW_HIDE);
+				}
+			}
+		};
+
+		const bool showPopup = m_isFindPanelVisible && m_isFindPanelOptionsPopupVisible;
+		setVisible(m_hFindPanelOptionsPopup, showPopup);
+		setVisible(m_hFindPanelOptionMatchCaseButton, showPopup);
+		setVisible(m_hFindPanelOptionWrapButton, showPopup);
+	}
+
 	void UpdateFindPanelVisibility()
 	{
 		EnsureFindPanelControlsCreated();
@@ -3542,11 +4138,20 @@ public:
 		{
 			if (hWndControl != nullptr)
 			{
-				::ShowWindow(hWndControl, visible ? SW_SHOWNA : SW_HIDE);
+				const bool isVisible = (::GetWindowLongPtrW(hWndControl, GWL_STYLE) & WS_VISIBLE) != 0;
+				if (isVisible != visible)
+				{
+					::ShowWindow(hWndControl, visible ? SW_SHOWNA : SW_HIDE);
+				}
 			}
 		};
 
 		const bool showFindRow = m_isFindPanelVisible;
+		if (!showFindRow)
+		{
+			m_isFindPanelOptionsPopupVisible = false;
+		}
+		setVisible(m_hFindPanelBackgroundHost, showFindRow);
 		setVisible(m_hFindPanelToggleButton, showFindRow);
 		setVisible(m_hFindPanelFindEdit, showFindRow);
 		setVisible(m_hFindPanelFindNextButton, showFindRow);
@@ -3559,6 +4164,7 @@ public:
 		setVisible(m_hFindPanelReplaceEdit, showReplaceRow);
 		setVisible(m_hFindPanelReplaceButton, showReplaceRow);
 		setVisible(m_hFindPanelReplaceAllButton, showReplaceRow);
+		UpdateFindPanelOptionsPopupVisibility();
 
 		if (m_hHotFindPanelButton != nullptr && !::IsWindowVisible(m_hHotFindPanelButton))
 		{
@@ -3576,16 +4182,17 @@ public:
 			return 0;
 		}
 
-		const int topPadding = MulDiv(13, dpiY, 96);
-		const int bottomPadding = MulDiv(13, dpiY, 96);
-		const int rowHeight = MulDiv(32, dpiY, 96);
-		const int rowSpacing = MulDiv(8, dpiY, 96);
+		const int topPadding = MulDiv(16, dpiY, 96);
+		const int bottomPadding = MulDiv(18, dpiY, 96);
+		const int rowHeight = MulDiv(36, dpiY, 96);
+		const int rowSpacing = MulDiv(12, dpiY, 96);
 		return topPadding + rowHeight + (m_isReplacePanelVisible ? rowSpacing + rowHeight : 0) + bottomPadding;
 	}
 
 	void LayoutFindPanelControls(const RECT& rcClient, const int dpiX, const int dpiY)
 	{
 		const RECT previousPanelRect = m_findPanelRect;
+		const RECT previousPopupRect = m_findPanelOptionsPopupRect;
 		RECT previousAreaRect{};
 		if (!::IsRectEmpty(&previousPanelRect))
 		{
@@ -3605,9 +4212,14 @@ public:
 			::SetRectEmpty(&m_findPanelFindEditFrameRect);
 			::SetRectEmpty(&m_findPanelReplaceEditFrameRect);
 			::SetRectEmpty(&m_findPanelSearchIconRect);
+			::SetRectEmpty(&m_findPanelOptionsPopupRect);
 			if (!::IsRectEmpty(&previousAreaRect))
 			{
-				::InvalidateRect(m_hWnd, &previousAreaRect, TRUE);
+				::InvalidateRect(m_hWnd, &previousAreaRect, FALSE);
+			}
+			if (!::IsRectEmpty(&previousPopupRect))
+			{
+				::InvalidateRect(m_hWnd, &previousPopupRect, FALSE);
 			}
 			return;
 		}
@@ -3615,16 +4227,16 @@ public:
 		const int clientWidth = rcClient.right - rcClient.left;
 		const int areaTop = m_nTopBarHeight;
 		const int areaHeight = GetFindPanelAreaHeightForDpi(dpiY);
-		const int panelTop = areaTop + MulDiv(8, dpiY, 96);
+		const int panelTop = areaTop + MulDiv(6, dpiY, 96);
 		const int panelBottom = areaTop + areaHeight - MulDiv(4, dpiY, 96);
 
-		const int leftOuterMargin = MulDiv(16, dpiX, 96);
-		const int rightOuterMargin = MulDiv(16, dpiX, 96);
-		int panelWidth = clientWidth - leftOuterMargin - rightOuterMargin;
-		const int desiredWidth = MulDiv(860, dpiX, 96);
-		panelWidth = (std::min)(panelWidth, desiredWidth);
-		panelWidth = (std::min)(panelWidth, MulDiv(clientWidth, 68, 100));
-		panelWidth = (std::max)(panelWidth, MulDiv(520, dpiX, 96));
+		const int leftOuterMargin = MulDiv(12, dpiX, 96);
+		const int rightOuterMargin = MulDiv(12, dpiX, 96);
+		const int maximumPanelWidth = clientWidth - leftOuterMargin - rightOuterMargin;
+		const int desiredWidth = MulDiv(m_isReplacePanelVisible ? 732 : 704, dpiX, 96);
+		const int minimumWidth = MulDiv(m_isReplacePanelVisible ? 666 : 560, dpiX, 96);
+		int panelWidth = (std::min)(maximumPanelWidth, desiredWidth);
+		panelWidth = (std::max)(panelWidth, (std::min)(minimumWidth, maximumPanelWidth));
 		panelWidth = (std::min)(panelWidth, (std::max)(1, clientWidth - MulDiv(8, dpiX, 96)));
 		int panelLeft = (clientWidth - panelWidth) / 2;
 		panelLeft = (std::max)(0, panelLeft);
@@ -3635,17 +4247,17 @@ public:
 		m_findPanelRect.right = panelRight;
 		m_findPanelRect.bottom = panelBottom;
 
-		const int innerPadding = MulDiv(10, dpiX, 96);
-		const int rowHeight = MulDiv(32, dpiY, 96);
-		const int rowSpacing = MulDiv(8, dpiY, 96);
-		const int rowTop = panelTop + MulDiv(7, dpiY, 96);
+		const int innerPadding = MulDiv(14, dpiX, 96);
+		const int rowHeight = MulDiv(36, dpiY, 96);
+		const int rowSpacing = MulDiv(12, dpiY, 96);
+		const int rowTop = MulDiv(12, dpiY, 96);
 		const int iconButtonWidth = rowHeight;
-		const int iconGap = MulDiv(4, dpiX, 96);
-		const int editToIconsGap = MulDiv(10, dpiX, 96);
+		const int iconGap = MulDiv(8, dpiX, 96);
+		const int editToIconsGap = MulDiv(14, dpiX, 96);
 
 		const int rightClusterWidth = (iconButtonWidth * 4) + (iconGap * 3);
-		const int rightClusterLeft = panelRight - innerPadding - rightClusterWidth;
-		const int toggleLeft = panelLeft + innerPadding;
+		const int rightClusterLeft = panelWidth - innerPadding - rightClusterWidth;
+		const int toggleLeft = innerPadding;
 		const int toggleRight = toggleLeft + iconButtonWidth;
 		const int findEditLeft = toggleRight + iconGap;
 		const int findEditRight = rightClusterLeft - editToIconsGap;
@@ -3664,15 +4276,33 @@ public:
 					(std::max)(1, width),
 					(std::max)(1, height),
 					SWP_NOZORDER | SWP_NOACTIVATE);
-				::InvalidateRect(hWndControl, nullptr, TRUE);
 			}
 		};
+
+		moveControl(
+			m_hFindPanelBackgroundHost,
+			m_findPanelRect.left,
+			m_findPanelRect.top,
+			m_findPanelRect.right - m_findPanelRect.left,
+			m_findPanelRect.bottom - m_findPanelRect.top);
+		if (m_hFindPanelBackgroundHost != nullptr)
+		{
+			const int hostWidth = m_findPanelRect.right - m_findPanelRect.left;
+			const int hostHeight = m_findPanelRect.bottom - m_findPanelRect.top;
+			const int hostRadius = (std::max)(MulDiv(12, dpiX, 96), 10);
+			HRGN hHostRegion = ::CreateRoundRectRgn(0, 0, hostWidth + 1, hostHeight + 1, hostRadius, hostRadius);
+			if (hHostRegion != nullptr)
+			{
+				::SetWindowRgn(m_hFindPanelBackgroundHost, hHostRegion, TRUE);
+			}
+			::SetWindowPos(m_hFindPanelBackgroundHost, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		}
 
 		moveControl(m_hFindPanelToggleButton, toggleLeft, rowTop, iconButtonWidth, rowHeight);
 		m_findPanelFindEditFrameRect = RECT{ findEditLeft, rowTop, safeFindEditRight, rowTop + rowHeight };
 		const int editInsetX = (std::max)(1, MulDiv(2, dpiX, 96));
-		const int editInsetTop = (std::max)(1, MulDiv(3, dpiY, 96));
-		const int editInsetBottom = (std::max)(1, MulDiv(2, dpiY, 96));
+		const int editInsetTop = (std::max)(1, MulDiv(4, dpiY, 96));
+		const int editInsetBottom = (std::max)(1, MulDiv(3, dpiY, 96));
 		moveControl(
 			m_hFindPanelFindEdit,
 			m_findPanelFindEditFrameRect.left + editInsetX,
@@ -3683,9 +4313,15 @@ public:
 		moveControl(m_hFindPanelFindPrevButton, rightClusterLeft + iconButtonWidth + iconGap, rowTop, iconButtonWidth, rowHeight);
 		moveControl(m_hFindPanelOptionsButton, rightClusterLeft + (iconButtonWidth + iconGap) * 2, rowTop, iconButtonWidth, rowHeight);
 		moveControl(m_hFindPanelCloseButton, rightClusterLeft + (iconButtonWidth + iconGap) * 3, rowTop, iconButtonWidth, rowHeight);
+		const RECT optionsButtonRect{
+			m_findPanelRect.left + rightClusterLeft + (iconButtonWidth + iconGap) * 2,
+			m_findPanelRect.top + rowTop,
+			m_findPanelRect.left + rightClusterLeft + (iconButtonWidth + iconGap) * 2 + iconButtonWidth,
+			m_findPanelRect.top + rowTop + rowHeight
+		};
 
-		const int searchIconSize = MulDiv(12, dpiY, 96);
-		const int searchIconLeft = m_findPanelFindEditFrameRect.right - searchIconSize - MulDiv(12, dpiX, 96);
+		const int searchIconSize = MulDiv(14, dpiY, 96);
+		const int searchIconLeft = m_findPanelFindEditFrameRect.right - searchIconSize - MulDiv(11, dpiX, 96);
 		const int searchIconTop = rowTop + ((rowHeight - searchIconSize) / 2);
 		m_findPanelSearchIconRect = RECT{
 			searchIconLeft,
@@ -3710,7 +4346,7 @@ public:
 			const int replaceButtonWidth = MulDiv(132, dpiX, 96);
 			const int replaceAllButtonWidth = MulDiv(152, dpiX, 96);
 			const int replaceButtonsTotal = replaceButtonWidth + iconGap + replaceAllButtonWidth;
-			const int replaceEditRight = panelRight - innerPadding - replaceButtonsTotal - iconGap;
+			const int replaceEditRight = panelWidth - innerPadding - replaceButtonsTotal - iconGap;
 			const int replaceEditLeft = findEditLeft;
 			const int safeReplaceEditRight = (std::max)(replaceEditLeft + minEditWidth, replaceEditRight);
 			m_findPanelReplaceEditFrameRect = RECT{ replaceEditLeft, replaceTop, safeReplaceEditRight, replaceTop + rowHeight };
@@ -3728,6 +4364,76 @@ public:
 			::SetRectEmpty(&m_findPanelReplaceEditFrameRect);
 		}
 
+		if (m_isFindPanelOptionsPopupVisible &&
+			m_hFindPanelOptionsPopup != nullptr &&
+			m_hFindPanelOptionMatchCaseButton != nullptr &&
+			m_hFindPanelOptionWrapButton != nullptr)
+		{
+			const int popupPaddingX = MulDiv(8, dpiX, 96);
+			const int popupPaddingY = MulDiv(6, dpiY, 96);
+			const int popupRowHeight = MulDiv(34, dpiY, 96);
+			const int popupWidth = GetFindPanelOptionsPopupWidthForDpi(dpiX);
+			const int popupHeight = (popupPaddingY * 2) + (popupRowHeight * 2);
+			const int popupOverlap = MulDiv(10, dpiY, 96);
+			int popupTop = optionsButtonRect.top - popupHeight + popupOverlap;
+			popupTop = (std::max)(MulDiv(20, dpiY, 96), popupTop);
+			const int popupRight = optionsButtonRect.right + MulDiv(6, dpiX, 96);
+			int popupLeft = popupRight - popupWidth;
+			popupLeft = (std::max)(MulDiv(8, dpiX, 96), popupLeft);
+			if (popupLeft + popupWidth > rcClient.right - MulDiv(10, dpiX, 96))
+			{
+				const int maxPopupLeft = static_cast<int>(rcClient.right) - popupWidth - MulDiv(10, dpiX, 96);
+				popupLeft = (std::max)(MulDiv(8, dpiX, 96), maxPopupLeft);
+			}
+
+			m_findPanelOptionsPopupRect = RECT{
+				popupLeft,
+				popupTop,
+				popupLeft + popupWidth,
+				popupTop + popupHeight
+			};
+			POINT popupScreenOrigin{
+				m_findPanelOptionsPopupRect.left,
+				m_findPanelOptionsPopupRect.top
+			};
+			::ClientToScreen(m_hWnd, &popupScreenOrigin);
+			::SetWindowPos(
+				m_hFindPanelOptionsPopup,
+				HWND_TOP,
+				popupScreenOrigin.x,
+				popupScreenOrigin.y,
+				popupWidth,
+				popupHeight,
+				SWP_NOACTIVATE | SWP_SHOWWINDOW);
+			moveControl(
+				m_hFindPanelOptionMatchCaseButton,
+				popupPaddingX,
+				popupPaddingY,
+				popupWidth - (popupPaddingX * 2),
+				popupRowHeight);
+			moveControl(
+				m_hFindPanelOptionWrapButton,
+				popupPaddingX,
+				popupPaddingY + popupRowHeight,
+				popupWidth - (popupPaddingX * 2),
+				popupRowHeight);
+
+			const int popupRadius = (std::max)(MulDiv(12, dpiX, 96), 8);
+			HRGN hPopupRegion = ::CreateRoundRectRgn(0, 0, popupWidth + 1, popupHeight + 1, popupRadius, popupRadius);
+			if (hPopupRegion != nullptr)
+			{
+				::SetWindowRgn(m_hFindPanelOptionsPopup, hPopupRegion, TRUE);
+			}
+
+			::SetWindowPos(m_hFindPanelOptionsPopup, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+			::SetWindowPos(m_hFindPanelOptionMatchCaseButton, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+			::SetWindowPos(m_hFindPanelOptionWrapButton, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		}
+		else
+		{
+			::SetRectEmpty(&m_findPanelOptionsPopupRect);
+		}
+
 		UpdateFindPanelButtonsEnabledState();
 		const RECT currentAreaRect{
 			rcClient.left,
@@ -3740,7 +4446,15 @@ public:
 		{
 			::UnionRect(&invalidateRect, &previousAreaRect, &currentAreaRect);
 		}
-		::InvalidateRect(m_hWnd, &invalidateRect, TRUE);
+		if (!::IsRectEmpty(&previousPopupRect))
+		{
+			::UnionRect(&invalidateRect, &invalidateRect, &previousPopupRect);
+		}
+		if (!::IsRectEmpty(&m_findPanelOptionsPopupRect))
+		{
+			::UnionRect(&invalidateRect, &invalidateRect, &m_findPanelOptionsPopupRect);
+		}
+		::InvalidateRect(m_hWnd, &invalidateRect, FALSE);
 	}
 
 	void LayoutMainControls()
@@ -3844,7 +4558,6 @@ public:
 		// Keep the editor region rectangular; non-rectangular clipping causes
 		// incorrect internal wrap width in multiline edit controls.
 		::SetWindowRgn(m_view.m_hWnd, nullptr, TRUE);
-		::InvalidateRect(m_view.m_hWnd, nullptr, FALSE);
 	}
 
 	bool IsFindPanelButtonControlId(const UINT controlId) const
@@ -3858,10 +4571,30 @@ public:
 		case kFindPanelCloseButtonId:
 		case kFindPanelReplaceButtonId:
 		case kFindPanelReplaceAllButtonId:
+		case kFindPanelOptionMatchCaseButtonId:
+		case kFindPanelOptionWrapButtonId:
 			return true;
 		default:
 			return false;
 		}
+	}
+
+	bool IsFindPanelPopupOptionButtonControlId(const UINT controlId) const
+	{
+		return controlId == kFindPanelOptionMatchCaseButtonId || controlId == kFindPanelOptionWrapButtonId;
+	}
+
+	bool IsFindPanelPopupOptionChecked(const UINT controlId) const
+	{
+		if (controlId == kFindPanelOptionMatchCaseButtonId)
+		{
+			return (m_dwSearchFlags & FR_MATCHCASE) != 0;
+		}
+		if (controlId == kFindPanelOptionWrapButtonId)
+		{
+			return m_isFindWrapEnabled;
+		}
+		return false;
 	}
 
 	void DrawFindPanelBackground(HDC hdc) const
@@ -3871,19 +4604,28 @@ public:
 			return;
 		}
 
+		const int panelWidth = m_findPanelRect.right - m_findPanelRect.left;
+		const int panelHeight = m_findPanelRect.bottom - m_findPanelRect.top;
+		if (panelWidth <= 0 || panelHeight <= 0)
+		{
+			return;
+		}
+
 		HBRUSH hFillBrush = ::CreateSolidBrush(m_findPanelBackgroundColor);
 		HPEN hBorderPen = ::CreatePen(PS_SOLID, 1, m_findPanelBorderColor);
 		HGDIOBJ hOldPen = hBorderPen ? ::SelectObject(hdc, hBorderPen) : nullptr;
 		HGDIOBJ hOldBrush = hFillBrush ? ::SelectObject(hdc, hFillBrush) : nullptr;
+		const int dpiX = ::GetDeviceCaps(hdc, LOGPIXELSX);
+		const int panelRadius = (std::max)(MulDiv(12, dpiX, 96), 10);
 
 		::RoundRect(
 			hdc,
-			m_findPanelRect.left,
-			m_findPanelRect.top,
-			m_findPanelRect.right - 1,
-			m_findPanelRect.bottom - 1,
-			10,
-			10);
+			0,
+			0,
+			panelWidth - 1,
+			panelHeight - 1,
+			panelRadius,
+			panelRadius);
 
 		if (hOldBrush != nullptr)
 		{
@@ -3913,7 +4655,8 @@ public:
 			HPEN hInputPen = ::CreatePen(PS_SOLID, 1, m_findPanelInputBorderColor);
 			HGDIOBJ hOldInputPen = hInputPen ? ::SelectObject(hdc, hInputPen) : nullptr;
 			HGDIOBJ hOldInputBrush = hInputBrush ? ::SelectObject(hdc, hInputBrush) : nullptr;
-			::RoundRect(hdc, rcFrame.left, rcFrame.top, rcFrame.right - 1, rcFrame.bottom - 1, 7, 7);
+			const int inputRadius = (std::max)(MulDiv(8, dpiX, 96), 7);
+			::RoundRect(hdc, rcFrame.left, rcFrame.top, rcFrame.right - 1, rcFrame.bottom - 1, inputRadius, inputRadius);
 			if (hOldInputBrush != nullptr)
 			{
 				::SelectObject(hdc, hOldInputBrush);
@@ -3938,6 +4681,37 @@ public:
 			drawInputFrame(m_findPanelReplaceEditFrameRect);
 		}
 
+		const HWND hFocus = ::GetFocus();
+		const auto drawAccentLine = [&](const RECT& rcFrame)
+		{
+			if (::IsRectEmpty(&rcFrame))
+			{
+				return;
+			}
+
+			RECT rcAccent{
+				rcFrame.left + 1,
+				rcFrame.bottom - 3,
+				rcFrame.right - 1,
+				rcFrame.bottom - 1
+			};
+			HBRUSH hAccentBrush = ::CreateSolidBrush(m_findPanelAccentColor);
+			if (hAccentBrush != nullptr)
+			{
+				::FillRect(hdc, &rcAccent, hAccentBrush);
+				::DeleteObject(hAccentBrush);
+			}
+		};
+
+		if (hFocus == m_hFindPanelFindEdit)
+		{
+			drawAccentLine(m_findPanelFindEditFrameRect);
+		}
+		else if (hFocus == m_hFindPanelReplaceEdit)
+		{
+			drawAccentLine(m_findPanelReplaceEditFrameRect);
+		}
+
 		if (!::IsRectEmpty(&m_findPanelSearchIconRect))
 		{
 			RECT rcIcon = m_findPanelSearchIconRect;
@@ -3959,6 +4733,45 @@ public:
 		}
 	}
 
+	void DrawFindPanelOptionsPopupBackground(HWND hWndPopup, HDC hdc) const
+	{
+		if (hWndPopup == nullptr || hdc == nullptr)
+		{
+			return;
+		}
+
+		RECT rcClient{};
+		::GetClientRect(hWndPopup, &rcClient);
+		if (::IsRectEmpty(&rcClient))
+		{
+			return;
+		}
+
+		HBRUSH hFillBrush = ::CreateSolidBrush(m_findPanelPopupBackgroundColor);
+		HPEN hBorderPen = ::CreatePen(PS_SOLID, 1, m_findPanelPopupBorderColor);
+		HGDIOBJ hOldPen = hBorderPen ? ::SelectObject(hdc, hBorderPen) : nullptr;
+		HGDIOBJ hOldBrush = hFillBrush ? ::SelectObject(hdc, hFillBrush) : nullptr;
+		const int radius = (std::max)(MulDiv(12, ::GetDeviceCaps(hdc, LOGPIXELSX), 96), 8);
+		::RoundRect(hdc, rcClient.left, rcClient.top, rcClient.right - 1, rcClient.bottom - 1, radius, radius);
+
+		if (hOldBrush != nullptr)
+		{
+			::SelectObject(hdc, hOldBrush);
+		}
+		if (hOldPen != nullptr)
+		{
+			::SelectObject(hdc, hOldPen);
+		}
+		if (hBorderPen != nullptr)
+		{
+			::DeleteObject(hBorderPen);
+		}
+		if (hFillBrush != nullptr)
+		{
+			::DeleteObject(hFillBrush);
+		}
+	}
+
 	bool DrawFindPanelButton(const DRAWITEMSTRUCT* pDrawItem) const
 	{
 		if (pDrawItem == nullptr || pDrawItem->CtlType != ODT_BUTTON || !IsFindPanelButtonControlId(pDrawItem->CtlID))
@@ -3971,9 +4784,146 @@ public:
 		const bool isHot =
 			(pDrawItem->itemState & ODS_HOTLIGHT) != 0 ||
 			pDrawItem->hwndItem == m_hHotFindPanelButton;
+		const bool isPopupOptionButton = IsFindPanelPopupOptionButtonControlId(pDrawItem->CtlID);
 		const bool isIconButton =
+			!isPopupOptionButton &&
 			pDrawItem->CtlID != kFindPanelReplaceButtonId &&
 			pDrawItem->CtlID != kFindPanelReplaceAllButtonId;
+		const int animatedButtonIndex = GetFindPanelAnimatedButtonIndex(pDrawItem->hwndItem);
+		const BYTE hoverBlend = animatedButtonIndex >= 0
+			? m_findPanelButtonHoverBlends[static_cast<size_t>(animatedButtonIndex)]
+			: static_cast<BYTE>(isHot ? 255 : 0);
+		const BYTE pressBlend = animatedButtonIndex >= 0
+			? (std::max)(m_findPanelButtonPressBlends[static_cast<size_t>(animatedButtonIndex)], static_cast<BYTE>(isPressed ? 255 : 0))
+			: static_cast<BYTE>(isPressed ? 255 : 0);
+
+		const RECT rcTarget = pDrawItem->rcItem;
+		const int targetWidth = rcTarget.right - rcTarget.left;
+		const int targetHeight = rcTarget.bottom - rcTarget.top;
+		HDC hdc = pDrawItem->hDC;
+		HDC hdcBuffer = nullptr;
+		HBITMAP hBufferBitmap = nullptr;
+		HGDIOBJ hOldBufferBitmap = nullptr;
+		RECT rc{ rcTarget };
+
+		if (hdc != nullptr && targetWidth > 0 && targetHeight > 0)
+		{
+			hdcBuffer = ::CreateCompatibleDC(hdc);
+			if (hdcBuffer != nullptr)
+			{
+				hBufferBitmap = ::CreateCompatibleBitmap(hdc, targetWidth, targetHeight);
+				if (hBufferBitmap != nullptr)
+				{
+					hOldBufferBitmap = ::SelectObject(hdcBuffer, hBufferBitmap);
+					rc = RECT{ 0, 0, targetWidth, targetHeight };
+					hdc = hdcBuffer;
+				}
+				else
+				{
+					::DeleteDC(hdcBuffer);
+					hdcBuffer = nullptr;
+				}
+			}
+		}
+
+		const auto finishBufferedPaint = [&]() -> bool
+		{
+			if (hdcBuffer != nullptr)
+			{
+				::BitBlt(
+					pDrawItem->hDC,
+					rcTarget.left,
+					rcTarget.top,
+					targetWidth,
+					targetHeight,
+					hdcBuffer,
+					0,
+					0,
+					SRCCOPY);
+				if (hOldBufferBitmap != nullptr)
+				{
+					::SelectObject(hdcBuffer, hOldBufferBitmap);
+				}
+				if (hBufferBitmap != nullptr)
+				{
+					::DeleteObject(hBufferBitmap);
+				}
+				::DeleteDC(hdcBuffer);
+			}
+			return true;
+		};
+
+		if (isPopupOptionButton)
+		{
+			HBRUSH hBaseBrush = ::CreateSolidBrush(m_findPanelPopupBackgroundColor);
+			if (hBaseBrush != nullptr)
+			{
+				::FillRect(hdc, &rc, hBaseBrush);
+				::DeleteObject(hBaseBrush);
+			}
+
+			if (pressBlend > 0 || hoverBlend > 0)
+			{
+				COLORREF hoverColor = BlendColors(m_findPanelPopupBackgroundColor, m_findPanelPopupHoverColor, hoverBlend);
+				hoverColor = BlendColors(hoverColor, m_findPanelButtonPressedColor, pressBlend);
+				HBRUSH hHoverBrush = ::CreateSolidBrush(hoverColor);
+				HGDIOBJ hOldBrush = hHoverBrush ? ::SelectObject(hdc, hHoverBrush) : nullptr;
+				HGDIOBJ hOldPen = ::SelectObject(hdc, ::GetStockObject(NULL_PEN));
+				RECT rcHover = rc;
+				::InflateRect(&rcHover, -1, 0);
+				const int hoverRadius = (std::max)(MulDiv(8, ::GetDeviceCaps(hdc, LOGPIXELSX), 96), 6);
+				::RoundRect(hdc, rcHover.left, rcHover.top, rcHover.right, rcHover.bottom, hoverRadius, hoverRadius);
+				::SelectObject(hdc, hOldPen);
+				if (hOldBrush != nullptr)
+				{
+					::SelectObject(hdc, hOldBrush);
+				}
+				if (hHoverBrush != nullptr)
+				{
+					::DeleteObject(hHoverBrush);
+				}
+			}
+
+			wchar_t caption[128]{};
+			::GetWindowTextW(pDrawItem->hwndItem, caption, static_cast<int>(std::size(caption)));
+			const HFONT textFont = (m_fontFindPanelText.m_hFont != nullptr)
+				? static_cast<HFONT>(m_fontFindPanelText)
+				: GetUiFontHandle();
+			const HFONT iconFont = (m_fontFindPanelIcons.m_hFont != nullptr)
+				? static_cast<HFONT>(m_fontFindPanelIcons)
+				: GetToolbarIconFontHandle();
+			HFONT hOldTextFont = nullptr;
+			if (textFont != nullptr)
+			{
+				hOldTextFont = reinterpret_cast<HFONT>(::SelectObject(hdc, textFont));
+			}
+			::SetBkMode(hdc, TRANSPARENT);
+			::SetTextColor(hdc, isDisabled ? BlendColors(m_findPanelButtonTextColor, m_findPanelPopupBackgroundColor, 96) : m_findPanelButtonTextColor);
+
+			RECT rcText = rc;
+			const int checkAreaWidth = MulDiv(32, ::GetDeviceCaps(hdc, LOGPIXELSX), 96);
+			rcText.left += checkAreaWidth;
+			rcText.right -= MulDiv(10, ::GetDeviceCaps(hdc, LOGPIXELSX), 96);
+			::DrawTextW(hdc, caption, -1, &rcText, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+			if (IsFindPanelPopupOptionChecked(pDrawItem->CtlID))
+			{
+				RECT rcCheck = rc;
+				rcCheck.left += MulDiv(8, ::GetDeviceCaps(hdc, LOGPIXELSX), 96);
+				rcCheck.right = rcCheck.left + MulDiv(18, ::GetDeviceCaps(hdc, LOGPIXELSX), 96);
+				if (iconFont != nullptr)
+				{
+					::SelectObject(hdc, iconFont);
+				}
+				::DrawTextW(hdc, L"\uE73E", 1, &rcCheck, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+			}
+
+			if (hOldTextFont != nullptr)
+			{
+				::SelectObject(hdc, hOldTextFont);
+			}
+			return finishBufferedPaint();
+		}
 
 		COLORREF backgroundColor = m_findPanelBackgroundColor;
 		COLORREF borderColor = m_findPanelBackgroundColor;
@@ -3982,16 +4932,12 @@ public:
 
 		if (isIconButton)
 		{
-			if (isPressed)
+			if (pressBlend > 0 || hoverBlend > 0)
 			{
-				backgroundColor = m_findPanelButtonPressedColor;
-				borderColor = m_findPanelInputBorderColor;
-				drawRoundedButton = true;
-			}
-			else if (isHot)
-			{
-				backgroundColor = m_findPanelButtonHoverColor;
-				borderColor = m_findPanelInputBorderColor;
+				backgroundColor = BlendColors(m_findPanelBackgroundColor, m_findPanelButtonHoverColor, hoverBlend);
+				backgroundColor = BlendColors(backgroundColor, m_findPanelButtonPressedColor, pressBlend);
+				const BYTE borderBlend = static_cast<BYTE>((std::max)(static_cast<int>(hoverBlend) / 2, static_cast<int>(pressBlend)));
+				borderColor = BlendColors(m_findPanelBackgroundColor, m_findPanelInputBorderColor, borderBlend);
 				drawRoundedButton = true;
 			}
 		}
@@ -4000,14 +4946,10 @@ public:
 			backgroundColor = m_findPanelInputBackgroundColor;
 			borderColor = m_findPanelInputBorderColor;
 			drawRoundedButton = true;
-			if (isPressed)
-			{
-				backgroundColor = m_findPanelButtonPressedColor;
-			}
-			else if (isHot)
-			{
-				backgroundColor = m_findPanelButtonHoverColor;
-			}
+			backgroundColor = BlendColors(backgroundColor, m_findPanelButtonHoverColor, hoverBlend);
+			backgroundColor = BlendColors(backgroundColor, m_findPanelButtonPressedColor, pressBlend);
+			borderColor = BlendColors(borderColor, m_findPanelButtonHoverColor, static_cast<BYTE>(hoverBlend / 3));
+			borderColor = BlendColors(borderColor, m_findPanelButtonPressedColor, static_cast<BYTE>(pressBlend / 2));
 		}
 		if (isDisabled)
 		{
@@ -4019,8 +4961,6 @@ public:
 			}
 		}
 
-		HDC hdc = pDrawItem->hDC;
-		RECT rc = pDrawItem->rcItem;
 		HBRUSH hBaseBrush = ::CreateSolidBrush(m_findPanelBackgroundColor);
 		if (hBaseBrush != nullptr)
 		{
@@ -4033,7 +4973,9 @@ public:
 			HPEN hBorderPen = ::CreatePen(PS_SOLID, 1, borderColor);
 			HGDIOBJ hOldPen = hBorderPen ? ::SelectObject(hdc, hBorderPen) : nullptr;
 			HGDIOBJ hOldBrush = hFillBrush ? ::SelectObject(hdc, hFillBrush) : nullptr;
-			const int radius = isIconButton ? 6 : 7;
+			const int radius = isIconButton
+				? (std::max)(MulDiv(8, ::GetDeviceCaps(hdc, LOGPIXELSX), 96), 6)
+				: (std::max)(MulDiv(8, ::GetDeviceCaps(hdc, LOGPIXELSX), 96), 7);
 			::RoundRect(hdc, rc.left, rc.top, rc.right - 1, rc.bottom - 1, radius, radius);
 			if (hOldBrush != nullptr)
 			{
@@ -4081,7 +5023,7 @@ public:
 			::SelectObject(hdc, hOldFont);
 		}
 
-		return true;
+		return finishBufferedPaint();
 	}
 
 	int HitTestTopMenuButton(const POINT ptClient) const
@@ -4134,7 +5076,9 @@ public:
 		::ClientToScreen(m_hWnd, &popupOrigin);
 
 		m_topMenuPressedIndex = pressedButtonIndex;
+		m_topMenuHoveredIndex = pressedButtonIndex;
 		InvalidateTopBar();
+		::RedrawWindow(m_hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
 
 		const UINT commandId = ::TrackPopupMenuEx(
 			hSubMenu,
@@ -4185,7 +5129,9 @@ public:
 		::ClientToScreen(m_hWnd, &popupOrigin);
 
 		m_topMenuPressedIndex = buttonIndex;
+		m_topMenuHoveredIndex = buttonIndex;
 		InvalidateTopBar();
+		::RedrawWindow(m_hWnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
 
 		const UINT selectedId = ::TrackPopupMenuEx(
 			overflowMenu,
@@ -4542,17 +5488,19 @@ public:
 		{
 			RECT rcButton = m_topMenuButtonRects[i];
 			const std::wstring caption = (i < m_topMenuCaptions.size()) ? m_topMenuCaptions[i] : L"";
+			RECT rcHighlight = rcButton;
+			::InflateRect(&rcHighlight, -MulDiv(4, GetDeviceCaps(hdc, LOGPIXELSX), 96), -MulDiv(4, GetDeviceCaps(hdc, LOGPIXELSX), 96));
+			const int radius = (std::max)(MulDiv(6, GetDeviceCaps(hdc, LOGPIXELSX), 96), 4);
 
 			if (static_cast<int>(i) == m_topMenuPressedIndex)
 			{
 				CBrush pressedBrush;
 				pressedBrush.CreateSolidBrush(m_topBarPressedColor);
 				CPen pressedPen;
-				pressedPen.CreatePen(PS_SOLID, 1, BlendColors(m_topBarPressedColor, m_topBarDividerColor, 96));
+				pressedPen.CreatePen(PS_SOLID, 1, BlendColors(m_topBarPressedColor, m_topBarDividerColor, 72));
 				const HGDIOBJ oldBrush = ::SelectObject(hdc, pressedBrush);
 				const HGDIOBJ oldPen = ::SelectObject(hdc, pressedPen);
-				const int radius = (std::max)(MulDiv(8, GetDeviceCaps(hdc, LOGPIXELSX), 96), 5);
-				::RoundRect(hdc, rcButton.left, rcButton.top, rcButton.right, rcButton.bottom, radius, radius);
+				::RoundRect(hdc, rcHighlight.left, rcHighlight.top, rcHighlight.right, rcHighlight.bottom, radius, radius);
 				::SelectObject(hdc, oldPen);
 				::SelectObject(hdc, oldBrush);
 			}
@@ -4562,11 +5510,10 @@ public:
 				CBrush hoverBrush;
 				hoverBrush.CreateSolidBrush(hoverFill);
 				CPen hoverPen;
-				hoverPen.CreatePen(PS_SOLID, 1, BlendColors(hoverFill, m_topBarDividerColor, 96));
+				hoverPen.CreatePen(PS_SOLID, 1, BlendColors(hoverFill, m_topBarDividerColor, 64));
 				const HGDIOBJ oldBrush = ::SelectObject(hdc, hoverBrush);
 				const HGDIOBJ oldPen = ::SelectObject(hdc, hoverPen);
-				const int radius = (std::max)(MulDiv(8, GetDeviceCaps(hdc, LOGPIXELSX), 96), 5);
-				::RoundRect(hdc, rcButton.left, rcButton.top, rcButton.right, rcButton.bottom, radius, radius);
+				::RoundRect(hdc, rcHighlight.left, rcHighlight.top, rcHighlight.right, rcHighlight.bottom, radius, radius);
 				::SelectObject(hdc, oldPen);
 				::SelectObject(hdc, oldBrush);
 			}
@@ -4690,11 +5637,6 @@ public:
 				}
 				::FillRect(hdc, &rcPaintFindArea, hAreaBrush);
 			}
-			RECT rcPaintFindPanel{};
-			if (!::IsRectEmpty(&m_findPanelRect) && ::IntersectRect(&rcPaintFindPanel, &m_findPanelRect, &ps.rcPaint))
-			{
-				DrawFindPanelBackground(hdc);
-			}
 		}
 		::EndPaint(m_hWnd, &ps);
 		bHandled = TRUE;
@@ -4763,6 +5705,11 @@ public:
 			UpdateTopBarAnimationState();
 			return 0;
 		}
+		if (wParam == kFindPanelAnimationTimerId)
+		{
+			UpdateFindPanelAnimationState();
+			return 0;
+		}
 
 		bHandled = FALSE;
 		return 0;
@@ -4781,6 +5728,7 @@ public:
 			GET_Y_LPARAM(lParam)
 		};
 		const int titleButtonIndex = HitTestTitleBarButton(pt);
+		const int topMenuButtonIndex = HitTestTopMenuButton(pt);
 		if (titleButtonIndex >= 0)
 		{
 			m_titleBarPressedButtonIndex = titleButtonIndex;
@@ -4790,8 +5738,9 @@ public:
 			InvalidateTopBar();
 			return 0;
 		}
-		if (HitTestTopMenuButton(pt) >= 0)
+		if (topMenuButtonIndex >= 0)
 		{
+			OpenTopMenuAtIndex(topMenuButtonIndex);
 			return 0;
 		}
 		if (IsPointInTitleBar(pt))
@@ -4857,13 +5806,6 @@ public:
 		if (toolbarIndex >= 0)
 		{
 			ExecuteToolbarCommand(toolbarIndex);
-			return 0;
-		}
-
-		const int buttonIndex = HitTestTopMenuButton(pt);
-		if (buttonIndex >= 0)
-		{
-			OpenTopMenuAtIndex(buttonIndex);
 			return 0;
 		}
 
@@ -4954,7 +5896,12 @@ public:
 			}
 			InvalidateTopBar();
 		}
-
+		if (m_topMenuPressedIndex != -1)
+		{
+			m_topMenuPressedIndex = -1;
+			m_topMenuHoveredIndex = -1;
+			InvalidateTopBar();
+		}
 		bHandled = FALSE;
 		return 0;
 	}
@@ -5898,6 +6845,16 @@ public:
 
 		return FALSE;
 	}
+
+	LRESULT OnMove(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
+	{
+		if (m_isFindPanelOptionsPopupVisible)
+		{
+			LayoutMainControls();
+		}
+		bHandled = FALSE;
+		return 0;
+	}
 	
 	LRESULT OnSize(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
 	{
@@ -5948,6 +6905,7 @@ public:
 	LRESULT OnDestroy(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
 		StopTopBarAnimationTimer();
+		StopFindPanelAnimationTimer();
 		if (m_pCurrentFindReplaceDialog != nullptr && ::IsWindow(m_pCurrentFindReplaceDialog->m_hWnd))
 		{
 			DetachFindDialogSubclass(m_pCurrentFindReplaceDialog->m_hWnd);
@@ -6607,12 +7565,56 @@ public:
 		}
 		if (!visible)
 		{
+			m_isFindPanelOptionsPopupVisible = false;
 			m_isReplacePanelVisible = false;
+			UpdatePressedFindPanelButton(nullptr);
+			UpdateHotFindPanelButton(nullptr);
 		}
 		m_isFindPanelVisible = visible;
-		UpdateFindPanelVisibility();
 		LayoutMainControls();
-		Invalidate(FALSE);
+		if (m_hFindPanelBackgroundHost != nullptr && ::IsWindow(m_hFindPanelBackgroundHost))
+		{
+			::RedrawWindow(
+				m_hFindPanelBackgroundHost,
+				nullptr,
+				nullptr,
+				RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE | RDW_ALLCHILDREN);
+		}
+	}
+
+	void SetFindPanelOptionsPopupVisible(bool visible)
+	{
+		if (visible && (!m_isFindPanelVisible || m_hFindPanelOptionsButton == nullptr || !::IsWindow(m_hFindPanelOptionsButton)))
+		{
+			visible = false;
+		}
+		if (m_isFindPanelOptionsPopupVisible == visible)
+		{
+			if (visible)
+			{
+				LayoutMainControls();
+			}
+			return;
+		}
+
+		m_isFindPanelOptionsPopupVisible = visible;
+		if (!visible && IsFindPanelOptionsPopupMessageTarget(m_hHotFindPanelButton))
+		{
+			UpdateHotFindPanelButton(nullptr);
+		}
+		if (!visible && IsFindPanelOptionsPopupMessageTarget(m_hPressedFindPanelButton))
+		{
+			UpdatePressedFindPanelButton(nullptr);
+		}
+		LayoutMainControls();
+		if (visible && m_hFindPanelOptionsPopup != nullptr && ::IsWindow(m_hFindPanelOptionsPopup))
+		{
+			::RedrawWindow(
+				m_hFindPanelOptionsPopup,
+				nullptr,
+				nullptr,
+				RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE | RDW_ALLCHILDREN);
+		}
 	}
 
 	void FocusFindPanelEdit(const bool selectAll)
@@ -6630,43 +7632,11 @@ public:
 
 	void ShowFindPanelOptionsMenu()
 	{
-		if (m_hFindPanelOptionsButton == nullptr || !::IsWindow(m_hFindPanelOptionsButton))
+		const bool showPopup = !m_isFindPanelOptionsPopupVisible;
+		SetFindPanelOptionsPopupVisible(showPopup);
+		if (!showPopup)
 		{
-			return;
-		}
-
-		RECT rcButton{};
-		::GetWindowRect(m_hFindPanelOptionsButton, &rcButton);
-		CMenu menu;
-		if (!menu.CreatePopupMenu())
-		{
-			return;
-		}
-
-		const std::wstring matchCaseCaption = GetFindPanelMatchCaseCaption();
-		const std::wstring wrapCaption = GetFindPanelWrapCaption();
-		menu.AppendMenuW(
-			MF_STRING | ((m_dwSearchFlags & FR_MATCHCASE) ? MF_CHECKED : MF_UNCHECKED),
-			kFindPanelOptionMatchCaseId,
-			matchCaseCaption.c_str());
-		menu.AppendMenuW(
-			MF_STRING | (m_isFindWrapEnabled ? MF_CHECKED : MF_UNCHECKED),
-			kFindPanelOptionWrapId,
-			wrapCaption.c_str());
-
-		ApplyPopupMenuTheme();
-		const UINT selectedCmd = menu.TrackPopupMenu(
-			TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
-			rcButton.left,
-			rcButton.bottom,
-			m_hWnd);
-		if (selectedCmd == kFindPanelOptionMatchCaseId)
-		{
-			m_dwSearchFlags ^= FR_MATCHCASE;
-		}
-		else if (selectedCmd == kFindPanelOptionWrapId)
-		{
-			m_isFindWrapEnabled = !m_isFindWrapEnabled;
+			FocusFindPanelEdit(false);
 		}
 	}
 
@@ -6862,6 +7832,19 @@ public:
 		return 0;
 	}
 
+	LRESULT OnFindPanelEditFocusChange(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
+	{
+		if (m_hFindPanelBackgroundHost != nullptr && ::IsWindow(m_hFindPanelBackgroundHost))
+		{
+			::RedrawWindow(
+				m_hFindPanelBackgroundHost,
+				nullptr,
+				nullptr,
+				RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE);
+		}
+		return 0;
+	}
+
 	LRESULT OnFindPanelFindNext(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 	{
 		m_dwSearchFlags |= FR_DOWN;
@@ -6895,6 +7878,26 @@ public:
 	LRESULT OnFindPanelOptions(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 	{
 		ShowFindPanelOptionsMenu();
+		return 0;
+	}
+
+	LRESULT OnFindPanelToggleMatchCase(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
+	{
+		m_dwSearchFlags ^= FR_MATCHCASE;
+		if (m_hFindPanelOptionMatchCaseButton != nullptr)
+		{
+			::InvalidateRect(m_hFindPanelOptionMatchCaseButton, nullptr, FALSE);
+		}
+		return 0;
+	}
+
+	LRESULT OnFindPanelToggleWrap(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
+	{
+		m_isFindWrapEnabled = !m_isFindWrapEnabled;
+		if (m_hFindPanelOptionWrapButton != nullptr)
+		{
+			::InvalidateRect(m_hFindPanelOptionWrapButton, nullptr, FALSE);
+		}
 		return 0;
 	}
 
