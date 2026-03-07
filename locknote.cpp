@@ -386,8 +386,11 @@ int Run(LPTSTR /*lpstrCmdLine*/ = NULL, int nCmdShow = SW_SHOWDEFAULT)
 		wndMain.SetThemeMode(static_cast<int>(ThemeMode::System));
 	}
 
+	wndMain.PrepareInitialWindowSizeForCreate();
+	RECT initialWindowRect{ 0, 0, wndMain.m_nWindowSizeX, wndMain.m_nWindowSizeY };
+
 	// create window
-	if (wndMain.CreateEx() == nullptr)
+	if (wndMain.CreateEx(nullptr, &initialWindowRect) == nullptr)
 	{
 		ATLTRACE(_T("Main window creation failed!\n"));
 		return 0;

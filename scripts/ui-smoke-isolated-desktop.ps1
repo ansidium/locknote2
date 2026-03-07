@@ -1,197 +1,133 @@
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$ExePath,
-    [Parameter(Mandatory = $true)]
-    [string]$Tag,
-    [string]$RunnerScript = '',
-    [switch]$AllowFallbackToCurrentDesktop
+    [string]$Win32ExePath = "",
+    [string]$X64ExePath = "",
+    [int[]]$DpiScales = @(100, 125, 150),
+    [switch]$SkipBuild,
+    [string]$OutputDir = ""
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = "Stop"
 
-if ([string]::IsNullOrWhiteSpace($RunnerScript)) {
-    $RunnerScript = Join-Path $PSScriptRoot 'ui-smoke-notepad-redesign.ps1'
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$runnerScript = Join-Path $PSScriptRoot "ui-smoke-notepad-redesign.ps1"
+$powershellExe = Join-Path $PSHOME "powershell.exe"
+
+if (-not (Test-Path -LiteralPath $runnerScript)) {
+    throw "Runner script was not found: $runnerScript"
 }
 
-if (-not (Test-Path -LiteralPath $ExePath)) {
-    throw "ExePath not found: $ExePath"
+$resolvedOutputDir = if ([string]::IsNullOrWhiteSpace($OutputDir)) {
+    Join-Path $repoRoot "artifacts\\screens\\ui-smoke"
 }
-if (-not (Test-Path -LiteralPath $RunnerScript)) {
-    throw "RunnerScript not found: $RunnerScript"
-}
-
-$powershellExe = Join-Path $PSHOME 'powershell.exe'
-$resolvedExe = (Resolve-Path -LiteralPath $ExePath).Path
-$resolvedRunner = (Resolve-Path -LiteralPath $RunnerScript).Path
-$workdir = (Resolve-Path -LiteralPath (Split-Path -Parent $RunnerScript)).Path
-
-$native = @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class IsolatedDesktopNative {
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    public struct STARTUPINFOW {
-        public int cb;
-        public string lpReserved;
-        public string lpDesktop;
-        public string lpTitle;
-        public int dwX;
-        public int dwY;
-        public int dwXSize;
-        public int dwYSize;
-        public int dwXCountChars;
-        public int dwYCountChars;
-        public int dwFillAttribute;
-        public int dwFlags;
-        public short wShowWindow;
-        public short cbReserved2;
-        public IntPtr lpReserved2;
-        public IntPtr hStdInput;
-        public IntPtr hStdOutput;
-        public IntPtr hStdError;
+else {
+    if ([System.IO.Path]::IsPathRooted($OutputDir)) {
+        $OutputDir
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct PROCESS_INFORMATION {
-        public IntPtr hProcess;
-        public IntPtr hThread;
-        public int dwProcessId;
-        public int dwThreadId;
-    }
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr CreateDesktopW(
-        string lpszDesktop,
-        IntPtr lpszDevice,
-        IntPtr pDevmode,
-        int dwFlags,
-        uint dwDesiredAccess,
-        IntPtr lpsa);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool CloseDesktop(IntPtr hDesktop);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern bool CreateProcessW(
-        string lpApplicationName,
-        string lpCommandLine,
-        IntPtr lpProcessAttributes,
-        IntPtr lpThreadAttributes,
-        bool bInheritHandles,
-        uint dwCreationFlags,
-        IntPtr lpEnvironment,
-        string lpCurrentDirectory,
-        ref STARTUPINFOW lpStartupInfo,
-        out PROCESS_INFORMATION lpProcessInformation);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool CloseHandle(IntPtr hObject);
-}
-"@
-
-Add-Type -TypeDefinition $native -ReferencedAssemblies 'System.dll'
-
-$desktopName = "CodexUiSmoke_{0}" -f ([Guid]::NewGuid().ToString('N'))
-$desktopAccess = 0x000F01FF # Full desktop access for automation and UI interaction.
-$desktopHandle = [IsolatedDesktopNative]::CreateDesktopW(
-    $desktopName,
-    [IntPtr]::Zero,
-    [IntPtr]::Zero,
-    0,
-    [uint32]$desktopAccess,
-    [IntPtr]::Zero)
-
-if ($desktopHandle -eq [IntPtr]::Zero) {
-    $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-    throw "CreateDesktopW failed. Win32Error=$err"
-}
-Write-Host "Created isolated desktop: $desktopName"
-
-$isolatedSucceeded = $false
-$isolatedError = $null
-try {
-    $escapedExe = $resolvedExe.Replace('"', '""')
-    $escapedRunner = $resolvedRunner.Replace('"', '""')
-    $escapedTag = $Tag.Replace('"', '""')
-
-    $commandLine = "-NoProfile -ExecutionPolicy Bypass -File `"$escapedRunner`" -ExePath `"$escapedExe`" -Tag `"$escapedTag`""
-
-    $startupInfo = New-Object IsolatedDesktopNative+STARTUPINFOW
-    $startupInfo.cb = [Runtime.InteropServices.Marshal]::SizeOf([type]([IsolatedDesktopNative+STARTUPINFOW]))
-    $startupInfo.lpDesktop = $desktopName
-
-    $procInfo = New-Object IsolatedDesktopNative+PROCESS_INFORMATION
-    $created = [IsolatedDesktopNative]::CreateProcessW(
-        $powershellExe,
-        $commandLine,
-        [IntPtr]::Zero,
-        [IntPtr]::Zero,
-        $false,
-        0,
-        [IntPtr]::Zero,
-        $workdir,
-        [ref]$startupInfo,
-        [ref]$procInfo)
-
-    if (-not $created) {
-        $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "CreateProcessW failed. Win32Error=$err"
-    }
-    Write-Host ("Started runner PID={0} on desktop {1}" -f $procInfo.dwProcessId, $desktopName)
-
-    try {
-        [void][IsolatedDesktopNative]::WaitForSingleObject($procInfo.hProcess, [uint32]::MaxValue)
-        [uint32]$exitCode = 0
-        if (-not [IsolatedDesktopNative]::GetExitCodeProcess($procInfo.hProcess, [ref]$exitCode)) {
-            $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            throw "GetExitCodeProcess failed. Win32Error=$err"
-        }
-        Write-Host ("Runner exit code: {0}" -f $exitCode)
-        if ($exitCode -ne 0) {
-            throw "Smoke runner failed on isolated desktop. ExitCode=$exitCode"
-        }
-        $isolatedSucceeded = $true
-    }
-    finally {
-        if ($procInfo.hThread -ne [IntPtr]::Zero) {
-            [void][IsolatedDesktopNative]::CloseHandle($procInfo.hThread)
-        }
-        if ($procInfo.hProcess -ne [IntPtr]::Zero) {
-            [void][IsolatedDesktopNative]::CloseHandle($procInfo.hProcess)
-        }
+    else {
+        Join-Path $repoRoot $OutputDir
     }
 }
-catch {
-    $isolatedError = $_
-    if (-not $AllowFallbackToCurrentDesktop) {
-        throw
-    }
-    Write-Warning ("Isolated desktop run failed: {0}" -f $_.Exception.Message)
-}
-finally {
-    if ($desktopHandle -ne [IntPtr]::Zero) {
-        [void][IsolatedDesktopNative]::CloseDesktop($desktopHandle)
-    }
+if (-not (Test-Path -LiteralPath $resolvedOutputDir)) {
+    New-Item -Path $resolvedOutputDir -ItemType Directory -Force | Out-Null
 }
 
-if (-not $isolatedSucceeded -and $AllowFallbackToCurrentDesktop) {
-    Write-Warning "Falling back to current desktop smoke run."
-    & $powershellExe -NoProfile -ExecutionPolicy Bypass -File $resolvedRunner -ExePath $resolvedExe -Tag $Tag
+$resolvedWin32ExePath = if ([string]::IsNullOrWhiteSpace($Win32ExePath)) {
+    Join-Path $repoRoot "Release\\LockNote2.exe"
+}
+elseif ([System.IO.Path]::IsPathRooted($Win32ExePath)) {
+    $Win32ExePath
+}
+else {
+    Join-Path $repoRoot $Win32ExePath
+}
+
+$resolvedX64ExePath = if ([string]::IsNullOrWhiteSpace($X64ExePath)) {
+    Join-Path $repoRoot "x64\\Release\\LockNote2.exe"
+}
+elseif ([System.IO.Path]::IsPathRooted($X64ExePath)) {
+    $X64ExePath
+}
+else {
+    Join-Path $repoRoot $X64ExePath
+}
+
+if (-not $SkipBuild) {
+    if (-not (Get-Command msbuild -ErrorAction SilentlyContinue)) {
+        throw "msbuild was not found. Run this script from a Visual Studio Developer PowerShell prompt."
+    }
+
+    Write-Host "=== Build Release|Win32 ===" -ForegroundColor Cyan
+    & msbuild ".\\locknote2.sln" "/m" "/t:Build" "/p:Configuration=Release;Platform=Win32;VcpkgEnableManifest=true" "/verbosity:minimal"
     if ($LASTEXITCODE -ne 0) {
-        throw "Fallback smoke runner failed. ExitCode=$LASTEXITCODE"
+        throw "Win32 build failed with exit code $LASTEXITCODE"
+    }
+
+    Write-Host "=== Build Release|x64 ===" -ForegroundColor Cyan
+    & msbuild ".\\locknote2.sln" "/m" "/t:Build" "/p:Configuration=Release;Platform=x64;VcpkgEnableManifest=true" "/verbosity:minimal"
+    if ($LASTEXITCODE -ne 0) {
+        throw "x64 build failed with exit code $LASTEXITCODE"
     }
 }
 
-$artifactDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'artifacts\screens'
-Write-Output ("before={0}" -f (Join-Path $artifactDir ("locknote2-redesign-before-{0}-final.png" -f $Tag)))
-Write-Output ("after={0}" -f (Join-Path $artifactDir ("locknote2-redesign-after-{0}-final.png" -f $Tag)))
-Write-Output ("status={0}" -f (Join-Path $artifactDir ("locknote2-statusbar-{0}-final.png" -f $Tag)))
-Write-Output ("menu={0}" -f (Join-Path $artifactDir ("locknote2-menu-{0}-final.png" -f $Tag)))
-Write-Output ("settings={0}" -f (Join-Path $artifactDir ("locknote2-settings-{0}-final.png" -f $Tag)))
+$targets = @(
+    [pscustomobject]@{
+        Tag = "win32"
+        ExePath = $resolvedWin32ExePath
+    },
+    [pscustomobject]@{
+        Tag = "x64"
+        ExePath = $resolvedX64ExePath
+    }
+)
+
+foreach ($target in $targets) {
+    if (-not (Test-Path -LiteralPath $target.ExePath)) {
+        throw "Executable for target '$($target.Tag)' was not found: $($target.ExePath)"
+    }
+}
+
+$results = New-Object System.Collections.Generic.List[object]
+
+foreach ($target in $targets) {
+    foreach ($dpiScale in $DpiScales) {
+        Write-Host ("=== UI smoke {0} @ {1}% DPI ===" -f $target.Tag, $dpiScale) -ForegroundColor Cyan
+        $output = & $powershellExe -NoProfile -ExecutionPolicy Bypass -File $runnerScript `
+            -ExePath $target.ExePath `
+            -Tag $target.Tag `
+            -DpiScale $dpiScale `
+            -OutputDir $resolvedOutputDir 2>&1
+        $exitCode = $LASTEXITCODE
+
+        $outputLines = @()
+        foreach ($line in $output) {
+            if ($line -ne $null) {
+                $outputLines += [string]$line
+            }
+        }
+
+        $jsonLine = $outputLines | Where-Object { $_.TrimStart().StartsWith("{") -and $_.TrimEnd().EndsWith("}") } | Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace($jsonLine)) {
+            throw ("Runner produced no JSON result for target={0}, dpi={1}. Output:`n{2}" -f
+                $target.Tag, $dpiScale, ($outputLines -join [Environment]::NewLine))
+        }
+
+        $result = $jsonLine | ConvertFrom-Json
+        $results.Add($result)
+
+        if ($exitCode -ne 0) {
+            throw ("Runner failed for target={0}, dpi={1}. Output:`n{2}" -f
+                $target.Tag, $dpiScale, ($outputLines -join [Environment]::NewLine))
+        }
+    }
+}
+
+$summaryPath = Join-Path $resolvedOutputDir "ui-smoke-matrix-summary.json"
+$results | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
+
+$results |
+    Sort-Object tag, dpi |
+    Select-Object tag, dpi, passed, diff_short_overflow, diff_short_back |
+    Format-Table -AutoSize
+
+Write-Output ("summary={0}" -f $summaryPath)

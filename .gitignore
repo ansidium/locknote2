@@ -33,3 +33,6 @@ vcpkg-manifest-install.log
 # Runtime artifacts
 *.tmp
 *.bak
+
+# Local visual QA artifacts
+artifacts/

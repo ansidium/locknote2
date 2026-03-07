@@ -121,7 +121,9 @@ public:
 	bool m_isStatusBarVisible{ true };
 	bool m_isWordWrapEnabled{ true };
 	bool m_isFormattingEnabled{ false };
+	int m_editorBaseMarginPx{ 20 };
 	static constexpr int kStatusBarParts = 6;
+	static constexpr int kEditorBottomOverflowEpsilonPx = 1;
 	static constexpr int kTopMenuOverflowMarker = -1;
 	static constexpr UINT kTopMenuOverflowCommandBase = 0xE900;
 	static constexpr UINT kMenuCmdFindPreviousPlaceholder = 0xE910;
@@ -222,6 +224,7 @@ public:
 	bool m_isFindPanelVisible{ false };
 	bool m_isReplacePanelVisible{ false };
 	bool m_isFindWrapEnabled{ true };
+	bool m_isMenuPopupTracking{ false };
 	HWND m_hHotFindPanelButton{ nullptr };
 	RECT m_findPanelRect{};
 	RECT m_findPanelFindEditFrameRect{};
@@ -274,20 +277,22 @@ public:
 			}
 		}
 
+		const bool isEditorMessageTarget =
+			m_view.m_hWnd != nullptr &&
+			(pMsg->hwnd == m_view.m_hWnd || pMsg->hwnd == m_hWndClient);
 		if (/*pMsg->message == WM_KEYDOWN || */pMsg->message == WM_KEYUP)
 		{
-			if (pMsg->wParam >= VK_PRIOR && pMsg->wParam <= VK_DOWN)
+			if (isEditorMessageTarget && pMsg->wParam >= VK_PRIOR && pMsg->wParam <= VK_DOWN)
 			{
 				UpdateStatusBar();
 			}
 		}
-		else if (/*pMsg->message == WM_LBUTTONDOWN || */pMsg->message == WM_LBUTTONUP/* || pMsg->message == WM_LBUTTONDBLCLK*/)
+		else if (pMsg->message == WM_LBUTTONUP || pMsg->message == WM_LBUTTONDBLCLK)
 		{
-			UpdateStatusBar();
-		}
-		else if (pMsg->message == WM_LBUTTONDBLCLK)
-		{
-			UpdateStatusBar();
+			if (isEditorMessageTarget && !m_isMenuPopupTracking)
+			{
+				UpdateStatusBar();
+			}
 		}
 
 		if (CFrameWindowImpl<CMainFrame>::PreTranslateMessage(pMsg))
@@ -568,7 +573,8 @@ public:
 
 		const LONG_PTR oldStyle = ::GetWindowLongPtrW(m_view, GWL_STYLE);
 		LONG_PTR newStyle = oldStyle;
-		newStyle |= (WS_VSCROLL | ES_AUTOVSCROLL);
+		newStyle |= ES_AUTOVSCROLL;
+		newStyle &= ~WS_VSCROLL;
 		if (enabled)
 		{
 			newStyle &= ~WS_HSCROLL;
@@ -595,9 +601,71 @@ public:
 		}
 		m_isWordWrapEnabled = enabled;
 		UpdateEditorVerticalScrollbarVisibility();
-		UpdateEditorFormattingRect();
 		UpdateStatusBar();
 		m_view.Invalidate();
+	}
+
+	bool TryGetEditorLineTopY(const int lineNumber, int& yTop) const
+	{
+		if (!m_view.m_hWnd || !::IsWindow(m_view.m_hWnd) || lineNumber < 0)
+		{
+			return false;
+		}
+
+		const LRESULT charIndex = ::SendMessageW(m_view.m_hWnd, EM_LINEINDEX, static_cast<WPARAM>(lineNumber), 0);
+		if (charIndex < 0)
+		{
+			return false;
+		}
+
+		const LRESULT packedPoint = ::SendMessageW(m_view.m_hWnd, EM_POSFROMCHAR, static_cast<WPARAM>(charIndex), 0);
+		if (packedPoint == -1)
+		{
+			return false;
+		}
+
+		yTop = GET_Y_LPARAM(static_cast<LPARAM>(packedPoint));
+		return true;
+	}
+
+	int GetEditorLinePitchPx() const
+	{
+		int linePitch = 0;
+
+		int yLine0 = 0;
+		int yLine1 = 0;
+		if (TryGetEditorLineTopY(0, yLine0) && TryGetEditorLineTopY(1, yLine1))
+		{
+			linePitch = yLine1 - yLine0;
+		}
+
+		if (linePitch <= 0 && m_view.m_hWnd && ::IsWindow(m_view.m_hWnd))
+		{
+			HDC hdc = ::GetDC(m_view.m_hWnd);
+			if (hdc != nullptr)
+			{
+				const HFONT hEditFont = reinterpret_cast<HFONT>(::SendMessageW(m_view.m_hWnd, WM_GETFONT, 0, 0));
+				HGDIOBJ hOldObject = nullptr;
+				if (hEditFont != nullptr)
+				{
+					hOldObject = ::SelectObject(hdc, hEditFont);
+				}
+
+				TEXTMETRICW tm{};
+				if (::GetTextMetricsW(hdc, &tm))
+				{
+					linePitch = tm.tmHeight + tm.tmExternalLeading;
+				}
+
+				if (hOldObject != nullptr)
+				{
+					::SelectObject(hdc, hOldObject);
+				}
+				::ReleaseDC(m_view.m_hWnd, hdc);
+			}
+		}
+
+		return (std::max)(1, linePitch);
 	}
 
 	bool ShouldShowEditorVerticalScrollbar() const
@@ -609,44 +677,27 @@ public:
 
 		RECT textRect{};
 		::SendMessageW(m_view.m_hWnd, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&textRect));
-		const int textHeight = static_cast<int>(textRect.bottom - textRect.top);
-		if (textHeight <= 0)
+		const int textBottom = static_cast<int>(textRect.bottom);
+		if (textBottom <= textRect.top)
 		{
 			return false;
 		}
 
-		int lineHeight = 0;
-		HDC hdc = ::GetDC(m_view.m_hWnd);
-		if (hdc != nullptr)
-		{
-			const HFONT hEditFont = reinterpret_cast<HFONT>(::SendMessageW(m_view.m_hWnd, WM_GETFONT, 0, 0));
-			HGDIOBJ hOldObject = nullptr;
-			if (hEditFont != nullptr)
-			{
-				hOldObject = ::SelectObject(hdc, hEditFont);
-			}
-
-			TEXTMETRICW tm{};
-			if (::GetTextMetricsW(hdc, &tm))
-			{
-				lineHeight = tm.tmHeight + tm.tmExternalLeading;
-			}
-
-			if (hOldObject != nullptr)
-			{
-				::SelectObject(hdc, hOldObject);
-			}
-			::ReleaseDC(m_view.m_hWnd, hdc);
-		}
-
-		if (lineHeight <= 0)
-		{
-			lineHeight = 1;
-		}
-
-		const int visibleLines = std::max(1, textHeight / lineHeight);
 		const int lineCount = static_cast<int>(::SendMessageW(m_view.m_hWnd, EM_GETLINECOUNT, 0, 0));
-		return lineCount > visibleLines;
+		if (lineCount <= 0)
+		{
+			return false;
+		}
+
+		int lastLineTop = 0;
+		if (!TryGetEditorLineTopY(lineCount - 1, lastLineTop))
+		{
+			return false;
+		}
+
+		const int linePitch = GetEditorLinePitchPx();
+		const int lastLineBottom = lastLineTop + linePitch;
+		return lastLineBottom > (textBottom + kEditorBottomOverflowEpsilonPx);
 	}
 
 	void UpdateEditorVerticalScrollbarVisibility() const
@@ -655,6 +706,8 @@ public:
 		{
 			return;
 		}
+
+		UpdateEditorFormattingRect();
 
 		const bool shouldShowScrollbar = ShouldShowEditorVerticalScrollbar();
 		const LONG_PTR oldStyle = ::GetWindowLongPtrW(m_view.m_hWnd, GWL_STYLE);
@@ -681,6 +734,7 @@ public:
 				SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 		}
 
+		UpdateEditorFormattingRect();
 		::ShowScrollBar(m_view.m_hWnd, SB_VERT, shouldShowScrollbar ? TRUE : FALSE);
 	}
 
@@ -690,6 +744,22 @@ public:
 		{
 			return;
 		}
+
+		const LONG_PTR style = ::GetWindowLongPtrW(m_view.m_hWnd, GWL_STYLE);
+		const bool isVerticalScrollbarVisible = (style & WS_VSCROLL) != 0;
+		const int leftMargin = (std::max)(0, m_editorBaseMarginPx);
+		int rightMargin = leftMargin;
+		if (!isVerticalScrollbarVisible)
+		{
+			const UINT dpi = GetWindowDpiValue(m_view.m_hWnd);
+			rightMargin += GetSystemMetricForDpi(SM_CXVSCROLL, dpi);
+		}
+		rightMargin = (std::max)(leftMargin, rightMargin);
+		::SendMessageW(
+			m_view.m_hWnd,
+			EM_SETMARGINS,
+			EC_LEFTMARGIN | EC_RIGHTMARGIN,
+			MAKELPARAM(leftMargin, rightMargin));
 
 		// Keep native edit formatting area bound to full client size.
 		// Custom EM_SETRECT widths can leave a stale internal wrap boundary
@@ -945,6 +1015,19 @@ public:
 		}
 
 		::FreeLibrary(hUxTheme);
+	}
+
+	void ApplyEditorViewTheme() const
+	{
+		if (m_view.m_hWnd == nullptr)
+		{
+			return;
+		}
+
+		// Keep scrollbar visuals on the modern Explorer metrics regardless of theme mode.
+		// Dark foreground/background colors are applied separately through paint/theme logic.
+		ApplyWindowThemeName(m_view.m_hWnd, L"Explorer");
+		ApplyDarkModeForWindow(m_view.m_hWnd);
 	}
 
 	void ApplyStatusBarTheme() const
@@ -2091,7 +2174,7 @@ public:
 		}
 
 		ApplyExplorerTheme(m_hWnd, m_isDarkThemeApplied);
-		ApplyExplorerTheme(m_view.m_hWnd, m_isDarkThemeApplied);
+		ApplyEditorViewTheme();
 		NormalizeStatusBarStyles();
 		ApplyStatusBarTheme();
 
@@ -3744,7 +3827,7 @@ public:
 		const int editWidth = (std::max)(0, editRight - editLeft);
 		const int editHeight = (std::max)(0, editBottom - editTop);
 		::MoveWindow(m_view, editLeft, editTop, editWidth, editHeight, FALSE);
-		UpdateEditorFormattingRect();
+		UpdateEditorVerticalScrollbarVisibility();
 		UpdateViewClipRegionForFindPanel(RECT{});
 		RefreshToolbarLayout();
 		RefreshTopMenuLayout();
@@ -4052,7 +4135,6 @@ public:
 
 		m_topMenuPressedIndex = pressedButtonIndex;
 		InvalidateTopBar();
-		EnsureStatusBarVisibleInPartsMode();
 
 		const UINT commandId = ::TrackPopupMenuEx(
 			hSubMenu,
@@ -4065,9 +4147,6 @@ public:
 		m_topMenuPressedIndex = -1;
 		m_topMenuHoveredIndex = -1;
 		InvalidateTopBar();
-		EnsureStatusBarVisibleInPartsMode();
-		LayoutMainControls();
-		UpdateStatusBar();
 
 		if (commandId != 0)
 		{
@@ -4107,7 +4186,6 @@ public:
 
 		m_topMenuPressedIndex = buttonIndex;
 		InvalidateTopBar();
-		EnsureStatusBarVisibleInPartsMode();
 
 		const UINT selectedId = ::TrackPopupMenuEx(
 			overflowMenu,
@@ -4120,7 +4198,6 @@ public:
 		m_topMenuPressedIndex = -1;
 		m_topMenuHoveredIndex = -1;
 		InvalidateTopBar();
-		EnsureStatusBarVisibleInPartsMode();
 
 		int selectedMenuPos = -1;
 		if (selectedId >= kTopMenuOverflowCommandBase)
@@ -4136,9 +4213,6 @@ public:
 			OpenTopMenuPopupByPosition(selectedMenuPos, anchorRect, buttonIndex);
 			return;
 		}
-
-		LayoutMainControls();
-		UpdateStatusBar();
 	}
 
 	void OpenTopMenuAtIndex(const int buttonIndex)
@@ -4629,6 +4703,12 @@ public:
 
 	LRESULT OnMouseMove(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM lParam, BOOL& bHandled)
 	{
+		if (m_isMenuPopupTracking)
+		{
+			bHandled = FALSE;
+			return 0;
+		}
+
 		const POINT pt{
 			GET_X_LPARAM(lParam),
 			GET_Y_LPARAM(lParam)
@@ -4658,6 +4738,12 @@ public:
 
 	LRESULT OnMouseLeave(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
+		if (m_isMenuPopupTracking)
+		{
+			bHandled = FALSE;
+			return 0;
+		}
+
 		if (m_titleBarHoveredButtonIndex != -1 || m_topMenuHoveredIndex != -1 || m_toolbarHoveredIndex != -1)
 		{
 			m_titleBarHoveredButtonIndex = -1;
@@ -4873,21 +4959,40 @@ public:
 		return 0;
 	}
 
-	void EnsureStatusBarVisibleInPartsMode()
+	void EnsureStatusBarVisibleInPartsMode(const bool forceRefresh = false)
 	{
 		if (m_hWndStatusBar == nullptr || !::IsWindow(m_hWndStatusBar))
 		{
 			return;
 		}
 
-		::SendMessageW(m_hWndStatusBar, SB_SIMPLE, FALSE, 0);
+		const BOOL wasSimpleMode = static_cast<BOOL>(::SendMessageW(m_hWndStatusBar, SB_ISSIMPLE, 0, 0));
+		if (wasSimpleMode)
+		{
+			::SendMessageW(m_hWndStatusBar, SB_SIMPLE, FALSE, 0);
+		}
 		NormalizeStatusBarStyles();
 		if (!m_isStatusBarVisible)
 		{
-			::ShowWindow(m_hWndStatusBar, SW_HIDE);
+			if (::IsWindowVisible(m_hWndStatusBar))
+			{
+				::ShowWindow(m_hWndStatusBar, SW_HIDE);
+			}
 			return;
 		}
 
+		const BOOL wasVisible = ::IsWindowVisible(m_hWndStatusBar);
+		const bool needsRefresh = forceRefresh || wasSimpleMode != FALSE || wasVisible == FALSE;
+		if (!needsRefresh)
+		{
+			return;
+		}
+
+		UINT swpFlags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+		if (!wasVisible)
+		{
+			swpFlags |= SWP_SHOWWINDOW;
+		}
 		::SetWindowPos(
 			m_hWndStatusBar,
 			nullptr,
@@ -4895,31 +5000,35 @@ public:
 			0,
 			0,
 			0,
-			SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+			swpFlags);
 		::SendMessageW(m_hWndStatusBar, WM_SIZE, 0, 0);
 		::InvalidateRect(m_hWndStatusBar, nullptr, FALSE);
 	}
 
 	LRESULT OnEnterMenuLoop(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
-		EnsureStatusBarVisibleInPartsMode();
-		UpdateStatusBar();
+		m_isMenuPopupTracking = true;
+		StopTopBarAnimationTimer();
 		bHandled = TRUE;
 		return 0;
 	}
 
 	LRESULT OnExitMenuLoop(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
+		m_isMenuPopupTracking = false;
 		EnsureStatusBarVisibleInPartsMode();
-		UpdateStatusBar();
+		UpdateStatusBar(false);
 		bHandled = TRUE;
 		return 0;
 	}
 
 	LRESULT OnMenuSelect(UINT /*uMsg*/, WPARAM /*wParam*/, LPARAM /*lParam*/, BOOL& bHandled)
 	{
-		EnsureStatusBarVisibleInPartsMode();
-		UpdateStatusBar();
+		if (!m_isMenuPopupTracking)
+		{
+			EnsureStatusBarVisibleInPartsMode();
+			UpdateStatusBar(false);
+		}
 		bHandled = TRUE;
 		return 0;
 	}
@@ -4937,7 +5046,7 @@ public:
 //	LRESULT CommandHandler(WORD /*wNotifyCode*/, WORD /*wID*/, HWND /*hWndCtl*/, BOOL& /*bHandled*/)
 //	LRESULT NotifyHandler(int /*idCtrl*/, LPNMHDR /*pnmh*/, BOOL& /*bHandled*/)
 
-	void UpdateStatusBar()
+	void UpdateStatusBar(const bool refreshEditorScrollbar = true)
 	{
 		auto num_lines = SendMessage(m_hWndClient, EM_GETLINECOUNT, 0, 0);
 		auto current_line_number = SendMessage(m_hWndClient, EM_LINEFROMCHAR, -1, 0);
@@ -4997,7 +5106,10 @@ public:
 			::InvalidateRect(m_hWndStatusBar, nullptr, FALSE);
 		}
 
-		UpdateEditorVerticalScrollbarVisibility();
+		if (refreshEditorScrollbar)
+		{
+			UpdateEditorVerticalScrollbarVisibility();
+		}
 
 		/*std::stringstream ss;
 		ss << num_lines << _T(" lines, ") << GetText().size() << _T(" characters. Line: ");
@@ -5076,9 +5188,10 @@ public:
 
 		// set left and right margins
 		auto dpi = GetDeviceCaps(dc, LOGPIXELSY);
-		auto dpi_factor_font = MulDiv(m_nFontSize, dpi, 72);
-		auto margin = MulDiv(20, dpi, 96);
+		const int margin = MulDiv(20, dpi, 96);
+		m_editorBaseMarginPx = margin;
 		m_view.SetMargins(margin, margin);
+		UpdateEditorVerticalScrollbarVisibility();
 
 		// Reset text to force realignment to margins without creating fake edit changes.
 		const std::string currentText = GetText();
@@ -5194,9 +5307,10 @@ public:
 
 		// set left and right margins
 		auto dpi = GetDeviceCaps(dc, LOGPIXELSY);
-		auto dpi_factor_font = MulDiv(m_nFontSize, dpi, 72);
-		auto margin = MulDiv(20, dpi, 96);
+		const int margin = MulDiv(20, dpi, 96);
+		m_editorBaseMarginPx = margin;
 		m_view.SetMargins(margin, margin);
+		UpdateEditorVerticalScrollbarVisibility();
 		
 		// Reset text to force realignment to margins without creating fake edit changes.
 		const std::string currentText = GetText();
@@ -5925,7 +6039,7 @@ public:
 				m_hMainMenu = ::GetMenu(m_hWnd);
 			}
 
-			m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_VSCROLL | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, 0);
+			m_hWndClient = m_view.Create(m_hWnd, rcDefault, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | ES_AUTOVSCROLL | ES_MULTILINE | ES_NOHIDESEL, 0);
 			AttachChromeResizeSubclass(m_view.m_hWnd);
 			m_view.SetLimitText(0x7ffffffe); // allow a lot of text to be entered
 			m_isWordWrapEnabled = ((::GetWindowLongPtrW(m_view, GWL_STYLE) & WS_HSCROLL) == 0);
@@ -6070,7 +6184,8 @@ public:
 			ATLASSERT(m_fontEdit);
 			m_view.SetFont(m_fontEdit);
 
-			auto margin = MulDiv(20, dpi, 96);
+			const int margin = MulDiv(20, dpi, 96);
+			m_editorBaseMarginPx = margin;
 			m_view.SetMargins(margin, margin);
 
 			if (!m_text.empty())
